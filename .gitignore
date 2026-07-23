@@ -1,0 +1,14 @@
+# Downloaded papers and their index — your personal library, not source.
+library/
+*.pdf
+metadata.jsonl
+
+# Browser session profile — contains login cookies. Never commit.
+.my-literature/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/

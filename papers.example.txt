@@ -1,0 +1,6 @@
+# One DOI or title per line. Lines starting with '#' are ignored.
+# These are well-known open-access papers, good for a first test run:
+
+10.1371/journal.pone.0173664
+Attention is all you need
+10.1038/s41586-020-2649-2
