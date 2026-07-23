@@ -344,32 +344,66 @@ def _proxied(url: str, cfg: Config) -> str:
 
 def _download_via_browser(ctx, page, pdf_href: str, cand: Candidate,
                           cfg: Config) -> Optional[str]:
+    """Save the PDF to disk. Chromium renders PDFs inline (no download event),
+    so we fetch the bytes through the authenticated context first, then fall
+    back to a real download event, then to the final URL after a navigation."""
     from .download import _filename_for, _file_is_pdf
     from urllib.parse import urljoin
 
     dest = os.path.join(cfg.out_dir, _filename_for(cand))
-    abs_url = pdf_href if pdf_href.startswith("http") else urljoin(page.url, pdf_href)
+    article_url = page.url
+    abs_url = pdf_href if pdf_href.startswith("http") else urljoin(article_url, pdf_href)
     abs_url = _proxied(abs_url, cfg)
+
+    # Strategy 1: fetch the bytes directly through the browser's authenticated
+    # request context (shares the proxy session cookies). Handles inline PDFs.
+    if _try_request_pdf(ctx, abs_url, dest, referer=article_url):
+        return dest
+
+    # Strategy 2: navigate; some publishers send the PDF as an attachment, which
+    # fires a real download event.
     try:
-        with page.expect_download(timeout=int(cfg.timeout * 1000)) as dl_info:
+        with page.expect_download(timeout=15000) as dl_info:
             page.goto(abs_url)
         dl_info.value.save_as(dest)
+        if _file_is_pdf(dest):
+            return dest
     except Exception:
-        # Some PDFs render inline instead of triggering a download event; pull
-        # the bytes directly through the (authenticated) browser context.
-        try:
-            resp = ctx.request.get(abs_url)
-        except Exception:
-            return None
-        if not resp.ok:
-            return None
-        with open(dest, "wb") as fh:
-            fh.write(resp.body())
-    if not _file_is_pdf(dest):
-        if os.path.exists(dest):
-            os.remove(dest)
-        return None
-    return dest
+        pass
+
+    # Strategy 3: the navigation may have landed on the real PDF URL (inline
+    # viewer). Fetch that final URL through the context.
+    try:
+        final = page.url
+        if final and final != abs_url and _try_request_pdf(ctx, final, dest,
+                                                           referer=abs_url):
+            return dest
+    except Exception:
+        pass
+
+    if os.path.exists(dest) and not _file_is_pdf(dest):
+        os.remove(dest)
+    return None
+
+
+def _try_request_pdf(ctx, url: str, dest: str, referer: str = "") -> bool:
+    """Fetch bytes via the context's request API and save only if it's a PDF."""
+    try:
+        headers = {"Referer": referer} if referer else None
+        resp = ctx.request.get(url, headers=headers, timeout=60000)
+    except Exception:
+        return False
+    if not resp.ok:
+        return False
+    try:
+        body = resp.body()
+    except Exception:
+        return False
+    if not body[:5] == b"%PDF-":
+        return False
+    with open(dest, "wb") as fh:
+        fh.write(body)
+    return True
 
 
 def _safe_close(ctx) -> None:
