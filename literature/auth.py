@@ -120,32 +120,91 @@ def fetch_with_session(cand: Candidate, cfg: Config) -> Optional[str]:
     sync_playwright = _require_playwright()
     if not os.path.isdir(cfg.browser_profile_dir):
         ensure_logged_in(cfg)
-
-    landing = _landing_url(cand, cfg)
     os.makedirs(cfg.out_dir, exist_ok=True)
 
     with sync_playwright() as pw:
-        ctx = _launch_persistent(pw, cfg, headless=True, accept_downloads=True)
+        ctx = _launch_persistent(pw, cfg, headless=cfg.headless_download,
+                                 accept_downloads=True)
         try:
-            page = ctx.new_page()
-            page.goto(landing, wait_until="domcontentloaded",
-                      timeout=int(cfg.timeout * 1000))
-            time.sleep(cfg.min_request_interval)
-
-            # A library resolver (SerialsSolutions/360 Link) shows an
-            # intermediate "find full text" page rather than the article. Follow
-            # its full-text link once to reach the publisher, then look for the
-            # PDF there.
-            pdf_href = _find_pdf_link(page)
-            if not pdf_href:
-                if _follow_fulltext_link(page, cfg):
-                    time.sleep(cfg.min_request_interval)
-                    pdf_href = _find_pdf_link(page)
-            if not pdf_href:
-                return None
-            return _download_via_browser(ctx, page, pdf_href, cand, cfg)
+            return _fetch_pdf_in_context(ctx, cand, cfg)
         finally:
             _safe_close(ctx)
+
+
+def download_batch_via_session(records, cfg: Config, on_item=None):
+    """Download many paywalled papers reusing ONE browser window.
+
+    ``records`` are dicts with at least a 'doi' (and optional 'title'). Opens a
+    single persistent context (visible by default so you can watch it and so
+    publishers that block headless browsers still work), navigates each paper
+    through the institutional proxy, and downloads the PDF. ``on_item`` is called
+    as on_item(index, total, title, result_dict) after each paper.
+
+    Returns a list of dicts: {title, doi, status, path, detail}.
+    """
+    sync_playwright = _require_playwright()
+    if not os.path.isdir(cfg.browser_profile_dir):
+        ensure_logged_in(cfg)
+    os.makedirs(cfg.out_dir, exist_ok=True)
+
+    records = list(records)
+    total = len(records)
+    results = []
+    with sync_playwright() as pw:
+        ctx = _launch_persistent(pw, cfg, headless=cfg.headless_download,
+                                 accept_downloads=True)
+        try:
+            for i, rec in enumerate(records, start=1):
+                doi = (rec.get("doi") or "").replace("https://doi.org/", "").strip()
+                title = rec.get("title") or doi or "?"
+                res = {"title": title, "doi": doi, "status": "not_found",
+                       "path": None, "detail": ""}
+                if not doi:
+                    res["detail"] = "No DOI to resolve."
+                else:
+                    cand = Candidate(pdf_url="", source="authenticated",
+                                     is_open_access=False, doi=doi, title=title)
+                    try:
+                        path = _fetch_pdf_in_context(ctx, cand, cfg)
+                        if path:
+                            res.update(status="downloaded", path=path)
+                        else:
+                            res.update(status="paywalled",
+                                       detail="No PDF reached through the proxy "
+                                              "(you may lack access, or the "
+                                              "publisher blocks automated fetch).")
+                    except Exception as exc:  # noqa: BLE001
+                        res.update(status="error", detail=str(exc)[:300])
+                results.append(res)
+                if on_item:
+                    on_item(i, total, title, res)
+                time.sleep(cfg.min_request_interval)
+        finally:
+            _safe_close(ctx)
+    return results
+
+
+def _fetch_pdf_in_context(ctx, cand: Candidate, cfg: Config) -> Optional[str]:
+    """Navigate to a paper (through the proxy) and download its PDF, using an
+    already-open browser context. Returns the saved path or None."""
+    landing = _landing_url(cand, cfg)
+    page = ctx.new_page()
+    try:
+        page.goto(landing, wait_until="domcontentloaded",
+                  timeout=int(cfg.timeout * 1000))
+        time.sleep(min(cfg.min_request_interval, 3.0))
+        pdf_href = _find_pdf_link(page)
+        if not pdf_href and _follow_fulltext_link(page, cfg):
+            time.sleep(min(cfg.min_request_interval, 3.0))
+            pdf_href = _find_pdf_link(page)
+        if not pdf_href:
+            return None
+        return _download_via_browser(ctx, page, pdf_href, cand, cfg)
+    finally:
+        try:
+            page.close()
+        except Exception:
+            pass
 
 
 def _landing_url(cand: Candidate, cfg: Config) -> str:

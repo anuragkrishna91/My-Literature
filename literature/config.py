@@ -53,6 +53,11 @@ class Config:
     ezproxy_login_prefix: Optional[str] = None
     resolver_openurl_base: Optional[str] = None
 
+    # Run the authenticated download browser visibly. Default True (visible):
+    # you can watch progress, and publishers that block headless browsers still
+    # work. Set False for silent background downloads once it's proven reliable.
+    headless_download: bool = False
+
     @property
     def user_agent(self) -> str:
         return DEFAULT_USER_AGENT.format(email=self.email)

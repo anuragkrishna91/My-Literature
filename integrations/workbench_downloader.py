@@ -97,15 +97,37 @@ def download_paywalled_via_session(records: Sequence[dict], pdf_dir: str,
     """Fetch the paywalled (non-OA) items via your institutional browser session.
 
     Only records without an OA PDF are attempted. Requires that you've run
-    setup_login() at least once so a session exists. Conservatively rate-limited;
-    meant for small batches of papers you have UHasselt access to.
+    setup_login() at least once so a session exists. Reuses a single browser
+    window (visible) and routes each DOI through the EZproxy. Returns
+    (n_ok, n_fail, messages) and calls callback(i, total, title) per paper.
     """
+    from literature.auth import download_batch_via_session
+
     paywalled = [r for r in records if not r.get("pdf_url")]
     if not paywalled:
         return 0, 0, ["Nothing to do: every result already has an OA PDF."]
+
     out = str(Path(pdf_dir) / AUTH_SUBDIR)
-    return _run(paywalled, out, email, allow_auth=True, callback=callback,
-                min_interval=5.0)
+    cfg = Config(email=email, out_dir=out, allow_auth=True,
+                 min_request_interval=3.0, max_per_run=max(len(paywalled), 1),
+                 institution_login_url=INSTITUTION_LOGIN_URL,
+                 ezproxy_login_prefix=EZPROXY_LOGIN_PREFIX)
+
+    msgs: List[str] = []
+
+    def on_item(i, total, title, res):
+        callback(i, total, title)
+        tag = {"downloaded": "OK", "paywalled": "no access",
+               "not_found": "no DOI", "error": "error"}.get(res["status"],
+                                                             res["status"])
+        line = f"[{tag}] {title}"
+        if res.get("detail"):
+            line += f" - {res['detail']}"
+        msgs.append(line)
+
+    results = download_batch_via_session(paywalled, cfg, on_item=on_item)
+    n_ok = sum(1 for r in results if r["status"] == "downloaded")
+    return n_ok, len(results) - n_ok, msgs
 
 
 def setup_login(email: str) -> None:
