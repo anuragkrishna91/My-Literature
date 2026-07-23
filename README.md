@@ -62,6 +62,28 @@ python -m literature get 10.1016/j.cell.2021.01.001 --allow-auth
 Downloaded PDFs and a `metadata.jsonl` index land in the output directory
 (default `./library`).
 
+## Embedding in another app (RAG / reference manager)
+
+The downloader is importable, not just a CLI. If you have a paper-RAG app whose
+search already returns OpenAlex results and whose corpus is fed by an indexer,
+you can drop this in between:
+
+```python
+from literature.api import download_openalex_works, Progress
+
+results = download_openalex_works(
+    works,                    # OpenAlex work dicts your search already returned
+    out_dir=corpus_pdf_dir,   # same folder your other PDFs live in
+    email="you@university.edu",
+    allow_auth=False,         # True to try your institutional session for paywalled
+)
+new_pdfs = [r.path for r in results if r.status == "downloaded"]
+# ...then run your existing chunk-and-index step over new_pdfs.
+```
+
+See `docs/integrate-rag.md` for the full wiring (e.g. a "Download OA PDFs into
+corpus" button alongside a Zotero sync).
+
 ## What this tool will not do
 
 - Store or type your university password.

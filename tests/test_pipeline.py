@@ -47,6 +47,9 @@ class FakeSession:
                 return resp
         return FakeResponse(status=404)
 
+    def close(self):
+        pass
+
 
 def test_looks_like_doi():
     assert looks_like_doi("10.1371/journal.pone.0173664")
@@ -104,6 +107,61 @@ def test_download_writes_real_pdf():
     with open(os.path.join(out, "metadata.jsonl")) as fh:
         rows = [json.loads(line) for line in fh if line.strip()]
     assert rows[-1]["source"] == "unpaywall"
+
+
+def test_openalex_work_yields_pdf_candidate():
+    from literature.resolve import candidates_from_openalex_work
+    work = {
+        "doi": "https://doi.org/10.1/abc",
+        "display_name": "A Work",
+        "best_oa_location": {"pdf_url": "https://oa.example/best.pdf"},
+        "locations": [{"pdf_url": "https://oa.example/other.pdf"}],
+        "open_access": {"oa_url": "https://oa.example/landing"},
+    }
+    cands = candidates_from_openalex_work(work)
+    urls = [c.pdf_url for c in cands]
+    assert "https://oa.example/best.pdf" in urls
+    assert cands[0].doi == "10.1/abc"
+    assert cands[0].source == "openalex"
+
+
+def test_openalex_work_without_pdf_falls_back_to_oa_url():
+    from literature.resolve import candidates_from_openalex_work
+    work = {"doi": "https://doi.org/10.1/x", "display_name": "No PDF",
+            "open_access": {"oa_url": "https://oa.example/only-landing"}}
+    cands = candidates_from_openalex_work(work)
+    assert len(cands) == 1
+    assert cands[0].pdf_url == "https://oa.example/only-landing"
+
+
+def test_download_openalex_works_uses_carried_pdf():
+    import literature.api as api
+    out = "/tmp/mylit-test-oa"
+    captured = {}
+
+    class _FakeSession(FakeSession):
+        pass
+
+    def fake_make_session(cfg):
+        return FakeSession({
+            "oa.example/best.pdf": FakeResponse(
+                content=MINIMAL_PDF, headers={"Content-Type": "application/pdf"}),
+        })
+
+    orig = api._make_session
+    api._make_session = fake_make_session
+    try:
+        works = [{
+            "doi": "https://doi.org/10.1/abc", "display_name": "A Work",
+            "best_oa_location": {"pdf_url": "https://oa.example/best.pdf"},
+        }]
+        results = api.download_openalex_works(
+            works, out_dir=out, email="e@x.edu",
+            progress=api.Progress(on_item=lambda r: captured.setdefault("seen", r)))
+    finally:
+        api._make_session = orig
+    assert results[0].status == "downloaded", results[0].detail
+    assert captured["seen"].status == "downloaded"
 
 
 def test_not_found_when_no_candidates():

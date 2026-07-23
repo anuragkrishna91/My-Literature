@@ -45,7 +45,7 @@ def resolve(query: str, session: PoliteSession, email: str) -> List[Candidate]:
         return []
 
     candidates: List[Candidate] = []
-    for finder in (_unpaywall, _arxiv, _pmc):
+    for finder in (_unpaywall, _openalex, _arxiv, _pmc):
         try:
             candidates.extend(finder(doi, session, email))
         except Exception:
@@ -90,6 +90,48 @@ def _unpaywall(doi: str, session: PoliteSession, email: str) -> List[Candidate]:
         pdf = loc.get("url_for_pdf")
         if pdf and all(pdf != c.pdf_url for c in out):
             out.append(Candidate(pdf, "unpaywall", True, doi=doi, title=title))
+    return out
+
+
+def _openalex(doi: str, session: PoliteSession, email: str) -> List[Candidate]:
+    # OpenAlex — the same source your search uses — exposes an OA PDF url per work.
+    url = f"https://api.openalex.org/works/doi:{doi}?mailto={email}"
+    resp = session.get(url, accept="application/json")
+    if resp.status_code != 200:
+        return []
+    work = resp.json()
+    return candidates_from_openalex_work(work)
+
+
+def candidates_from_openalex_work(work: dict) -> List[Candidate]:
+    """Extract open-access PDF candidates from an OpenAlex work object.
+
+    Lets a caller that already has OpenAlex results (e.g. a search UI) skip the
+    lookup entirely and download straight from what it holds.
+    """
+    doi = (work.get("doi") or "").replace("https://doi.org/", "") or None
+    title = work.get("display_name") or work.get("title")
+    out: List[Candidate] = []
+    seen = set()
+    locations = []
+    best = work.get("best_oa_location")
+    if best:
+        locations.append(best)
+    locations.extend(work.get("locations", []) or [])
+    primary = work.get("primary_location")
+    if primary:
+        locations.append(primary)
+    for loc in locations:
+        if not loc:
+            continue
+        pdf = loc.get("pdf_url")
+        if pdf and pdf not in seen:
+            seen.add(pdf)
+            out.append(Candidate(pdf, "openalex", True, doi=doi, title=title))
+    # Fall back to the work-level OA url if no location carried a direct PDF.
+    oa_url = (work.get("open_access") or {}).get("oa_url")
+    if oa_url and oa_url not in seen:
+        out.append(Candidate(oa_url, "openalex", True, doi=doi, title=title))
     return out
 
 
