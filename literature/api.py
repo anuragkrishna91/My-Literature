@@ -28,7 +28,7 @@ from .config import Config
 from .download import DownloadResult, download_first_available
 from .http import PoliteSession
 from .pipeline import fetch_one
-from .resolve import candidates_from_openalex_work
+from .resolve import Candidate, candidates_from_openalex_work
 
 
 @dataclass
@@ -106,3 +106,39 @@ def download_openalex_works(works: Sequence[dict], *, out_dir: str, email: str,
                               "No OA PDF in the OpenAlex record and no DOI to resolve.")
 
     return _run(list(works), handle, cfg, progress)
+
+
+def download_records(records: Sequence[dict], *, out_dir: str, email: str,
+                     allow_auth: bool = False,
+                     min_request_interval: float = 3.0,
+                     max_per_run: int = 100,
+                     progress: Optional[Progress] = None) -> List[DownloadResult]:
+    """Download from lightweight record dicts: {pdf_url?, doi?, title?}.
+
+    This matches the shape a search UI often already holds (e.g. the workbench's
+    ``search_openalex`` results), so it can be called without reshaping data.
+
+    Strategy per record: try the record's own ``pdf_url`` first; on failure fall
+    back to DOI resolution (Unpaywall/OpenAlex/arXiv/PMC), and, when
+    ``allow_auth`` is set, the authenticated institutional session for anything
+    still behind a paywall.
+    """
+    cfg = Config(email=email, out_dir=out_dir, allow_auth=allow_auth,
+                 min_request_interval=min_request_interval, max_per_run=max_per_run)
+
+    def handle(rec: dict, session: PoliteSession) -> DownloadResult:
+        doi = (rec.get("doi") or "").replace("https://doi.org/", "") or None
+        title = rec.get("title")
+        label = title or doi or "?"
+        pdf_url = rec.get("pdf_url")
+        if pdf_url:
+            cand = Candidate(pdf_url, "openalex", True, doi=doi, title=title)
+            result = download_first_available(label, [cand], session, cfg)
+            if result.status == "downloaded":
+                return result
+        if doi:
+            return fetch_one(doi, session, cfg)
+        return DownloadResult(label, None, None, "not_found",
+                              "No working PDF url and no DOI to resolve.")
+
+    return _run(list(records), handle, cfg, progress)

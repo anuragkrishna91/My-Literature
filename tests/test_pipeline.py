@@ -164,6 +164,27 @@ def test_download_openalex_works_uses_carried_pdf():
     assert captured["seen"].status == "downloaded"
 
 
+def test_download_records_uses_pdf_url_then_falls_back():
+    import literature.api as api
+    out = "/tmp/mylit-test-rec"
+
+    def fake_make_session(cfg):
+        return FakeSession({
+            "oa.example/rec.pdf": FakeResponse(
+                content=MINIMAL_PDF, headers={"Content-Type": "application/pdf"}),
+        })
+
+    orig = api._make_session
+    api._make_session = fake_make_session
+    try:
+        records = [{"pdf_url": "https://oa.example/rec.pdf",
+                    "doi": "https://doi.org/10.1/rec", "title": "Rec Paper"}]
+        results = api.download_records(records, out_dir=out, email="e@x.edu")
+    finally:
+        api._make_session = orig
+    assert results[0].status == "downloaded", results[0].detail
+
+
 def test_not_found_when_no_candidates():
     cfg = Config(email="e@x.edu", out_dir="/tmp/mylit-test-out3")
     session = FakeSession({})
