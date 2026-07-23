@@ -37,6 +37,47 @@ def _require_playwright():
     return sync_playwright
 
 
+def _clear_stale_locks(profile_dir: str) -> None:
+    """Remove Chromium singleton lock files left behind by a crashed or
+    force-closed browser. Safe to delete when no live Chromium holds the
+    profile; if one does, the relaunch still fails and we surface a clear
+    message rather than this cryptic Playwright error."""
+    for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+        p = os.path.join(profile_dir, name)
+        try:
+            if os.path.lexists(p):
+                os.remove(p)
+        except OSError:
+            pass
+
+
+def _launch_persistent(pw, cfg: Config, **kwargs):
+    """Launch a persistent browser context, self-healing a stale profile lock.
+
+    The common failure ("profile is already in use") is usually an orphaned
+    Chromium from a previous run, not a genuinely concurrent browser. Clear the
+    lock files and retry once; if it still fails, raise an actionable message.
+    """
+    try:
+        return pw.chromium.launch_persistent_context(
+            cfg.browser_profile_dir, user_agent=cfg.user_agent, **kwargs)
+    except Exception as exc:  # noqa: BLE001
+        if "already in use" not in str(exc).lower():
+            raise
+        _clear_stale_locks(cfg.browser_profile_dir)
+        try:
+            return pw.chromium.launch_persistent_context(
+                cfg.browser_profile_dir, user_agent=cfg.user_agent, **kwargs)
+        except Exception:
+            raise RuntimeError(
+                "The browser profile is still locked by a Chromium that's "
+                "running. Close every browser window the tool opened (or just "
+                "restart your computer), then try again. If it keeps happening, "
+                "delete this folder and log in once more:\n  "
+                f"{cfg.browser_profile_dir}"
+            ) from exc
+
+
 def ensure_logged_in(cfg: Config, login_url: Optional[str] = None) -> None:
     """Open a browser so the user can establish/refresh their session.
 
@@ -54,10 +95,7 @@ def ensure_logged_in(cfg: Config, login_url: Optional[str] = None) -> None:
         "signed in.\n"
     )
     with sync_playwright() as pw:
-        ctx = pw.chromium.launch_persistent_context(
-            cfg.browser_profile_dir, headless=False,
-            user_agent=cfg.user_agent,
-        )
+        ctx = _launch_persistent(pw, cfg, headless=False)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         try:
             page.goto(start, wait_until="domcontentloaded")
@@ -87,10 +125,7 @@ def fetch_with_session(cand: Candidate, cfg: Config) -> Optional[str]:
     os.makedirs(cfg.out_dir, exist_ok=True)
 
     with sync_playwright() as pw:
-        ctx = pw.chromium.launch_persistent_context(
-            cfg.browser_profile_dir, headless=True,
-            user_agent=cfg.user_agent, accept_downloads=True,
-        )
+        ctx = _launch_persistent(pw, cfg, headless=True, accept_downloads=True)
         try:
             page = ctx.new_page()
             page.goto(landing, wait_until="domcontentloaded",
