@@ -185,6 +185,19 @@ def test_download_records_uses_pdf_url_then_falls_back():
     assert results[0].status == "downloaded", results[0].detail
 
 
+def test_publisher_classification():
+    from literature.publishers import publisher_for_doi, publisher_for_record
+    assert publisher_for_doi("10.1039/D0EE01234A") == "RSC"
+    assert publisher_for_doi("10.1021/acs.jpclett.0c01234") == "ACS"
+    assert publisher_for_doi("10.1038/s41586-020-2649-2").startswith("Nature")
+    assert publisher_for_doi("https://doi.org/10.1002/adma.202001234") == "Wiley"
+    assert publisher_for_doi("10.1016/j.cell.2021.01.001") == "Elsevier"
+    assert publisher_for_doi(None) is None
+    # journal-name fallback when the prefix is unknown
+    assert publisher_for_record({"doi": "10.9999/x", "journal": "Advanced Materials"}) == "Wiley"
+    assert publisher_for_record({"doi": None, "journal": "Unknown J"}) == "Other"
+
+
 def test_not_found_when_no_candidates():
     cfg = Config(email="e@x.edu", out_dir="/tmp/mylit-test-out3")
     session = FakeSession({})
