@@ -192,11 +192,8 @@ def _fetch_pdf_in_context(ctx, cand: Candidate, cfg: Config) -> Optional[str]:
     try:
         page.goto(landing, wait_until="domcontentloaded",
                   timeout=int(cfg.timeout * 1000))
-        time.sleep(min(cfg.min_request_interval, 3.0))
-        pdf_href = _find_pdf_link(page)
-        if not pdf_href and _follow_fulltext_link(page, cfg):
-            time.sleep(min(cfg.min_request_interval, 3.0))
-            pdf_href = _find_pdf_link(page)
+        _settle(page, cfg)
+        pdf_href = _safe_find_pdf_link(page, cfg)
         if not pdf_href:
             return None
         return _download_via_browser(ctx, page, pdf_href, cand, cfg)
@@ -205,6 +202,51 @@ def _fetch_pdf_in_context(ctx, cand: Candidate, cfg: Config) -> Optional[str]:
             page.close()
         except Exception:
             pass
+
+
+def _settle(page, cfg: Config) -> None:
+    """Wait for EZproxy's chain of redirects to finish before touching the DOM.
+
+    The 'Execution context was destroyed' errors come from inspecting the page
+    while the proxy is still bouncing it to the publisher. networkidle waits
+    until navigations stop; the sleep gives late JS a moment to inject the PDF
+    link."""
+    for _ in range(3):
+        try:
+            page.wait_for_load_state("networkidle",
+                                     timeout=int(cfg.timeout * 1000))
+            break
+        except Exception:
+            time.sleep(1.0)
+    time.sleep(min(cfg.min_request_interval, 3.0))
+
+
+def _safe_find_pdf_link(page, cfg: Config) -> Optional[str]:
+    """Find the PDF link, tolerating a redirect that fires mid-search."""
+    for _ in range(3):
+        try:
+            # Give the standard citation meta tag a moment to appear.
+            try:
+                page.wait_for_selector('meta[name="citation_pdf_url"]',
+                                       timeout=5000)
+            except Exception:
+                pass
+            href = _find_pdf_link(page)
+            if href:
+                return href
+            if _follow_fulltext_link(page, cfg):
+                _settle(page, cfg)
+                href = _find_pdf_link(page)
+                if href:
+                    return href
+            return None
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc).lower()
+            if "context was destroyed" in msg or "navigation" in msg:
+                time.sleep(2.0)
+                continue
+            raise
+    return None
 
 
 def _landing_url(cand: Candidate, cfg: Config) -> str:
@@ -251,14 +293,31 @@ def _follow_fulltext_link(page, cfg: Config) -> bool:
 
 def _find_pdf_link(page) -> Optional[str]:
     """Look for a direct-PDF link on the article landing page."""
-    # Publishers commonly expose the PDF via a citation meta tag.
+    # Publishers commonly expose the PDF via a citation meta tag (the standard
+    # Google Scholar uses) — most reliable, try it first.
     meta = page.query_selector('meta[name="citation_pdf_url"]')
     if meta:
         href = meta.get_attribute("content")
         if href:
             return href
-    for sel in ('a[href$=".pdf"]', 'a[href*="/pdf"]', 'a:has-text("PDF")'):
-        el = page.query_selector(sel)
+    # Publisher-specific and generic PDF link patterns.
+    selectors = (
+        'a[href$=".pdf"]',
+        'a[href*="/pdf"]',
+        'a[href*="pdf"][href*="download"]',
+        'a[href*="/epdf/"]',            # Wiley
+        'a[href*="/doi/pdf"]',          # ACS / Wiley / Taylor & Francis
+        'a[data-track-action*="pdf" i]',  # Nature / Springer
+        'a[aria-label*="PDF" i]',
+        'a:has-text("Download PDF")',
+        'a:has-text("PDF")',
+        'a:has-text("Full text PDF")',
+    )
+    for sel in selectors:
+        try:
+            el = page.query_selector(sel)
+        except Exception:
+            continue
         if el:
             href = el.get_attribute("href")
             if href:
@@ -266,19 +325,42 @@ def _find_pdf_link(page) -> Optional[str]:
     return None
 
 
+def _proxied(url: str, cfg: Config) -> str:
+    """Ensure a URL goes through the EZproxy session.
+
+    A PDF link may point back at the bare publisher host, which is outside the
+    authenticated proxy session and would hit the paywall. Route any such link
+    through the proxy prefix so it stays authenticated. Links the proxy already
+    rewrote (they carry the proxy's domain) are left as-is."""
+    if not (cfg.ezproxy_login_prefix and url and url.startswith("http")):
+        return url
+    from urllib.parse import urlparse
+    proxy_host = urlparse(cfg.ezproxy_login_prefix).netloc  # login.bib-proxy...
+    proxy_suffix = proxy_host.split(".", 1)[1] if "." in proxy_host else proxy_host
+    if proxy_suffix and proxy_suffix in url:
+        return url
+    return cfg.ezproxy_login_prefix + url
+
+
 def _download_via_browser(ctx, page, pdf_href: str, cand: Candidate,
                           cfg: Config) -> Optional[str]:
     from .download import _filename_for, _file_is_pdf
+    from urllib.parse import urljoin
 
     dest = os.path.join(cfg.out_dir, _filename_for(cand))
-    abs_url = pdf_href if pdf_href.startswith("http") else page.url
+    abs_url = pdf_href if pdf_href.startswith("http") else urljoin(page.url, pdf_href)
+    abs_url = _proxied(abs_url, cfg)
     try:
         with page.expect_download(timeout=int(cfg.timeout * 1000)) as dl_info:
             page.goto(abs_url)
         dl_info.value.save_as(dest)
     except Exception:
-        # Some PDFs render inline instead of triggering a download event.
-        resp = ctx.request.get(abs_url)
+        # Some PDFs render inline instead of triggering a download event; pull
+        # the bytes directly through the (authenticated) browser context.
+        try:
+            resp = ctx.request.get(abs_url)
+        except Exception:
+            return None
         if not resp.ok:
             return None
         with open(dest, "wb") as fh:
