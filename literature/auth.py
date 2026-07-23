@@ -150,6 +150,11 @@ def fetch_with_session(cand: Candidate, cfg: Config) -> Optional[str]:
 
 def _landing_url(cand: Candidate, cfg: Config) -> str:
     """Where to start the authenticated fetch for this paper."""
+    # EZproxy: route the DOI through the proxy so the publisher page loads inside
+    # the authenticated session. The proxy rewrites in-page links (including the
+    # PDF link) to stay within the session, so no resolver hop is needed.
+    if cfg.ezproxy_login_prefix and cand.doi:
+        return cfg.ezproxy_login_prefix + publisher_landing_url(cand.doi)
     if cfg.resolver_openurl_base and cand.doi:
         from urllib.parse import quote
         return cfg.resolver_openurl_base + quote(cand.doi, safe="")

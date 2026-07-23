@@ -113,6 +113,7 @@ def download_records(records: Sequence[dict], *, out_dir: str, email: str,
                      min_request_interval: float = 3.0,
                      max_per_run: int = 100,
                      institution_login_url: Optional[str] = None,
+                     ezproxy_login_prefix: Optional[str] = None,
                      resolver_openurl_base: Optional[str] = None,
                      progress: Optional[Progress] = None) -> List[DownloadResult]:
     """Download from lightweight record dicts: {pdf_url?, doi?, title?}.
@@ -129,6 +130,7 @@ def download_records(records: Sequence[dict], *, out_dir: str, email: str,
     cfg = Config(email=email, out_dir=out_dir, allow_auth=allow_auth,
                  min_request_interval=min_request_interval, max_per_run=max_per_run,
                  institution_login_url=institution_login_url,
+                 ezproxy_login_prefix=ezproxy_login_prefix,
                  resolver_openurl_base=resolver_openurl_base)
 
     def handle(rec: dict, session: PoliteSession) -> DownloadResult:

@@ -25,18 +25,18 @@ from literature.api import Progress, download_records
 from literature.config import Config
 
 # ===========================================================================
-# YOUR LIBRARY SETTINGS — edit these two lines for your institution.
+# YOUR LIBRARY SETTINGS — edit these for your institution.
 # ===========================================================================
-# The page opened when you click "Set up / refresh login". Log in here.
-INSTITUTION_LOGIN_URL = (
-    "https://tl3ry3ge2c.search.serialssolutions.com/ejp/?libHash=TL3RY3GE2C#/?language=en-US"
-)
-# A URL prefix that resolves a DOI to full text through your library. The tool
-# appends the DOI to this. For SerialsSolutions/360 Link this is the OpenURL
-# endpoint on your library's resolver host.
-RESOLVER_OPENURL_BASE = (
-    "https://tl3ry3ge2c.search.serialssolutions.com/?rft_id=info:doi/"
-)
+# UHasselt uses EZproxy. Accessing a resource through this prefix triggers the
+# UHasselt username/password login; once logged in, the session is reused.
+EZPROXY_LOGIN_PREFIX = "https://login.bib-proxy.uhasselt.be/login?url="
+
+# The page opened when you click "Set up / refresh login". Pointing the proxy at
+# a subscribed publisher makes EZproxy show the UHasselt login prompt.
+INSTITUTION_LOGIN_URL = EZPROXY_LOGIN_PREFIX + "https://www.sciencedirect.com/"
+
+# Alternative (unused for UHasselt): a link-resolver OpenURL prefix.
+RESOLVER_OPENURL_BASE = None
 # ===========================================================================
 
 # Subfolders under PDF_DIR so ingest.py picks the PDFs up and they don't collide
@@ -71,6 +71,7 @@ def _run(records: Sequence[dict], out_dir: str, email: str, allow_auth: bool,
         records, out_dir=out_dir, email=email, allow_auth=allow_auth,
         min_request_interval=min_interval, max_per_run=max(total, 1),
         institution_login_url=INSTITUTION_LOGIN_URL,
+        ezproxy_login_prefix=EZPROXY_LOGIN_PREFIX,
         resolver_openurl_base=RESOLVER_OPENURL_BASE,
         progress=Progress(on_item=on_item),
     )
@@ -112,5 +113,6 @@ def setup_login(email: str) -> None:
     reused for later paywalled downloads. Never stores your password."""
     from literature.auth import ensure_logged_in
     cfg = Config(email=email, institution_login_url=INSTITUTION_LOGIN_URL,
+                 ezproxy_login_prefix=EZPROXY_LOGIN_PREFIX,
                  resolver_openurl_base=RESOLVER_OPENURL_BASE)
     ensure_logged_in(cfg, login_url=INSTITUTION_LOGIN_URL)

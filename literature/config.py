@@ -44,10 +44,13 @@ class Config:
     # Institutional access (optional). When set, the authenticated path uses
     # these instead of going straight to the publisher via doi.org.
     #   institution_login_url : the page opened for you to log in (your library).
-    #   resolver_openurl_base : a URL prefix that, with a DOI appended, resolves
-    #                           to the full text through your library (e.g. a
-    #                           SerialsSolutions/360 Link OpenURL endpoint).
+    #   ezproxy_login_prefix  : an EZproxy '/login?url=' prefix. When set, the
+    #                           authenticated path routes each DOI through it, so
+    #                           the publisher page loads inside your proxy session.
+    #   resolver_openurl_base : alternative to EZproxy — a link-resolver OpenURL
+    #                           prefix that, with a DOI appended, finds full text.
     institution_login_url: Optional[str] = None
+    ezproxy_login_prefix: Optional[str] = None
     resolver_openurl_base: Optional[str] = None
 
     @property
