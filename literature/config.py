@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Optional
 
 
 DEFAULT_USER_AGENT = (
@@ -39,6 +40,15 @@ class Config:
     # Where the persistent browser profile (cookies/session) is stored, so you
     # only log in occasionally. Contains session cookies — keep it private.
     browser_profile_dir: str = os.path.expanduser("~/.my-literature/browser-profile")
+
+    # Institutional access (optional). When set, the authenticated path uses
+    # these instead of going straight to the publisher via doi.org.
+    #   institution_login_url : the page opened for you to log in (your library).
+    #   resolver_openurl_base : a URL prefix that, with a DOI appended, resolves
+    #                           to the full text through your library (e.g. a
+    #                           SerialsSolutions/360 Link OpenURL endpoint).
+    institution_login_url: Optional[str] = None
+    resolver_openurl_base: Optional[str] = None
 
     @property
     def user_agent(self) -> str:

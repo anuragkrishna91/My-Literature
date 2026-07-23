@@ -112,6 +112,8 @@ def download_records(records: Sequence[dict], *, out_dir: str, email: str,
                      allow_auth: bool = False,
                      min_request_interval: float = 3.0,
                      max_per_run: int = 100,
+                     institution_login_url: Optional[str] = None,
+                     resolver_openurl_base: Optional[str] = None,
                      progress: Optional[Progress] = None) -> List[DownloadResult]:
     """Download from lightweight record dicts: {pdf_url?, doi?, title?}.
 
@@ -121,10 +123,13 @@ def download_records(records: Sequence[dict], *, out_dir: str, email: str,
     Strategy per record: try the record's own ``pdf_url`` first; on failure fall
     back to DOI resolution (Unpaywall/OpenAlex/arXiv/PMC), and, when
     ``allow_auth`` is set, the authenticated institutional session for anything
-    still behind a paywall.
+    still behind a paywall. ``resolver_openurl_base`` routes that authenticated
+    fetch through a library link resolver.
     """
     cfg = Config(email=email, out_dir=out_dir, allow_auth=allow_auth,
-                 min_request_interval=min_request_interval, max_per_run=max_per_run)
+                 min_request_interval=min_request_interval, max_per_run=max_per_run,
+                 institution_login_url=institution_login_url,
+                 resolver_openurl_base=resolver_openurl_base)
 
     def handle(rec: dict, session: PoliteSession) -> DownloadResult:
         doi = (rec.get("doi") or "").replace("https://doi.org/", "") or None

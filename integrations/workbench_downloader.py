@@ -24,6 +24,21 @@ from typing import Callable, List, Sequence, Tuple
 from literature.api import Progress, download_records
 from literature.config import Config
 
+# ===========================================================================
+# YOUR LIBRARY SETTINGS — edit these two lines for your institution.
+# ===========================================================================
+# The page opened when you click "Set up / refresh login". Log in here.
+INSTITUTION_LOGIN_URL = (
+    "https://tl3ry3ge2c.search.serialssolutions.com/ejp/?libHash=TL3RY3GE2C#/?language=en-US"
+)
+# A URL prefix that resolves a DOI to full text through your library. The tool
+# appends the DOI to this. For SerialsSolutions/360 Link this is the OpenURL
+# endpoint on your library's resolver host.
+RESOLVER_OPENURL_BASE = (
+    "https://tl3ry3ge2c.search.serialssolutions.com/?rft_id=info:doi/"
+)
+# ===========================================================================
+
 # Subfolders under PDF_DIR so ingest.py picks the PDFs up and they don't collide
 # with the app's own OpenAlex or Zotero downloads.
 OA_SUBDIR = "openalex_resolved"
@@ -55,6 +70,8 @@ def _run(records: Sequence[dict], out_dir: str, email: str, allow_auth: bool,
     results = download_records(
         records, out_dir=out_dir, email=email, allow_auth=allow_auth,
         min_request_interval=min_interval, max_per_run=max(total, 1),
+        institution_login_url=INSTITUTION_LOGIN_URL,
+        resolver_openurl_base=RESOLVER_OPENURL_BASE,
         progress=Progress(on_item=on_item),
     )
     n_ok = sum(1 for r in results if r.status == "downloaded")
@@ -91,7 +108,9 @@ def download_paywalled_via_session(records: Sequence[dict], pdf_dir: str,
 
 
 def setup_login(email: str) -> None:
-    """Open a browser so you can log in through UHasselt once; the session is
+    """Open your library login page so you can sign in once; the session is
     reused for later paywalled downloads. Never stores your password."""
     from literature.auth import ensure_logged_in
-    ensure_logged_in(Config(email=email))
+    cfg = Config(email=email, institution_login_url=INSTITUTION_LOGIN_URL,
+                 resolver_openurl_base=RESOLVER_OPENURL_BASE)
+    ensure_logged_in(cfg, login_url=INSTITUTION_LOGIN_URL)

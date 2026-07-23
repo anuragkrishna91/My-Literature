@@ -45,7 +45,8 @@ def ensure_logged_in(cfg: Config, login_url: Optional[str] = None) -> None:
     """
     sync_playwright = _require_playwright()
     os.makedirs(cfg.browser_profile_dir, exist_ok=True)
-    start = login_url or "https://www.google.com/scholar"
+    start = (login_url or cfg.institution_login_url
+             or "https://www.google.com/scholar")
     print(
         "\nOpening a browser. Log in through your institution as you normally "
         "would\n(including any MFA). The tool never sees your password — it only "
@@ -82,7 +83,7 @@ def fetch_with_session(cand: Candidate, cfg: Config) -> Optional[str]:
     if not os.path.isdir(cfg.browser_profile_dir):
         ensure_logged_in(cfg)
 
-    landing = publisher_landing_url(cand.doi) if cand.doi else cand.pdf_url
+    landing = _landing_url(cand, cfg)
     os.makedirs(cfg.out_dir, exist_ok=True)
 
     with sync_playwright() as pw:
@@ -94,15 +95,59 @@ def fetch_with_session(cand: Candidate, cfg: Config) -> Optional[str]:
             page = ctx.new_page()
             page.goto(landing, wait_until="domcontentloaded",
                       timeout=int(cfg.timeout * 1000))
-            # Politeness: one deliberate pause before probing for the PDF link.
             time.sleep(cfg.min_request_interval)
+
+            # A library resolver (SerialsSolutions/360 Link) shows an
+            # intermediate "find full text" page rather than the article. Follow
+            # its full-text link once to reach the publisher, then look for the
+            # PDF there.
             pdf_href = _find_pdf_link(page)
             if not pdf_href:
+                if _follow_fulltext_link(page, cfg):
+                    time.sleep(cfg.min_request_interval)
+                    pdf_href = _find_pdf_link(page)
+            if not pdf_href:
                 return None
-            path = _download_via_browser(ctx, page, pdf_href, cand, cfg)
-            return path
+            return _download_via_browser(ctx, page, pdf_href, cand, cfg)
         finally:
             _safe_close(ctx)
+
+
+def _landing_url(cand: Candidate, cfg: Config) -> str:
+    """Where to start the authenticated fetch for this paper."""
+    if cfg.resolver_openurl_base and cand.doi:
+        from urllib.parse import quote
+        return cfg.resolver_openurl_base + quote(cand.doi, safe="")
+    if cand.doi:
+        return publisher_landing_url(cand.doi)
+    return cand.pdf_url
+
+
+def _follow_fulltext_link(page, cfg: Config) -> bool:
+    """On a resolver page, click the first 'full text / article' link.
+
+    Returns True if it navigated somewhere new (i.e. on to the publisher).
+    """
+    before = page.url
+    selectors = (
+        'a:has-text("Full Text")', 'a:has-text("Full text")',
+        'a:has-text("View Article")', 'a:has-text("Article")',
+        'a:has-text("Download PDF")', 'a:has-text("PDF")',
+        'a[href*="doi.org"]',
+    )
+    for sel in selectors:
+        el = page.query_selector(sel)
+        if not el:
+            continue
+        try:
+            el.click()
+            page.wait_for_load_state("domcontentloaded",
+                                     timeout=int(cfg.timeout * 1000))
+        except Exception:
+            continue
+        if page.url != before:
+            return True
+    return False
 
 
 def _find_pdf_link(page) -> Optional[str]:
