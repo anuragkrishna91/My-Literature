@@ -4,10 +4,16 @@ import argparse
 import json
 import sys
 
+from .alerts import (ALERTS_FILE, AlertError, add_alert, check_alerts,
+                     describe, load_alerts, remove_alert)
+from .analysis import recommend, rsi
 from .portfolio import PortfolioError, load_portfolio, value_portfolio
 from .quotes import fetch_eur_usd, fetch_quotes
 from .watchlist import (WATCHLIST_FILE, add_symbol, all_symbols,
                         load_watchlist, remove_symbol)
+
+NOT_ADVICE = ("Signals are mechanical (trend/momentum/RSI), informational "
+              "only — not financial advice.")
 
 
 def _fmt(value, pattern="%.2f", empty="-"):
@@ -53,12 +59,12 @@ def cmd_watch(args):
                 "day_pct": q.day_change_pct, "month_pct": q.month_change_pct,
                 "ytd_pct": q.ytd_change_pct, "high_52w": q.high_52w,
                 "low_52w": q.low_52w, "pct_off_high": q.pct_off_high,
-                "trend": q.trend,
+                "trend": q.trend, "rsi": rsi(q.closes),
             })
         print(json.dumps(out, indent=2))
     else:
         headers = ["Company", "Sym", "Price", "Day", "1M", "YTD",
-                   "52w Low", "52w High", "Off High", "Trend"]
+                   "52w Low", "52w High", "Off High", "RSI", "Trend"]
         for sector in watchlist:
             entries = [(s, n) for sec, s, n in flat if sec == sector]
             sector_rows = []
@@ -66,7 +72,7 @@ def cmd_watch(args):
             for symbol, name in entries:
                 q = quotes.get(symbol)
                 if not q:
-                    sector_rows.append([name, symbol] + ["-"] * 8)
+                    sector_rows.append([name, symbol] + ["-"] * 9)
                     continue
                 if q.day_change_pct is not None:
                     day_moves.append(q.day_change_pct)
@@ -74,7 +80,8 @@ def cmd_watch(args):
                     name, symbol, _fmt(q.last), _fmt_pct(q.day_change_pct),
                     _fmt_pct(q.month_change_pct), _fmt_pct(q.ytd_change_pct),
                     _fmt(q.low_52w), _fmt(q.high_52w),
-                    _fmt_pct(q.pct_off_high), q.trend or "-",
+                    _fmt_pct(q.pct_off_high), _fmt(rsi(q.closes), "%.0f"),
+                    q.trend or "-",
                 ])
             avg = sum(day_moves) / len(day_moves) if day_moves else None
             print()
@@ -138,6 +145,108 @@ def cmd_remove(args):
     return 1
 
 
+def cmd_recommend(args):
+    watchlist = load_watchlist()
+    flat = all_symbols(watchlist)
+    names = {symbol: name for _, symbol, name in flat}
+    symbols = [symbol for _, symbol, _ in flat]
+    failures = []
+    print("Fetching %d quotes..." % len(symbols), file=sys.stderr)
+    quotes = fetch_quotes(symbols, on_error=lambda s, m: failures.append((s, m)))
+
+    scored = []
+    for symbol, quote in quotes.items():
+        rec = recommend(quote)
+        rec["symbol"] = symbol
+        rec["name"] = names.get(symbol, symbol)
+        scored.append(rec)
+    scored.sort(key=lambda r: r["score"], reverse=True)
+
+    if args.json:
+        print(json.dumps(scored, indent=2))
+    else:
+        print()
+        for rec in scored:
+            print("%-8s %-22s score %+d  %-8s RSI %s" % (
+                rec["symbol"], rec["name"], rec["score"], rec["label"],
+                _fmt(rec["rsi"], "%.0f")))
+            for reason in rec["reasons"]:
+                print("           - %s" % reason)
+        print()
+        print(NOT_ADVICE)
+
+    for symbol, message in failures:
+        print("warning: %s: %s" % (symbol, message), file=sys.stderr)
+    return 0
+
+
+def cmd_alert_add(args):
+    try:
+        rule = add_alert(args.symbol, args.kind, args.value)
+    except (AlertError, ValueError) as exc:
+        print("error: %s" % exc, file=sys.stderr)
+        return 1
+    print("Alert #%d added: %s (saved to %s)" % (
+        rule["id"], describe(rule), ALERTS_FILE))
+    return 0
+
+
+def cmd_alert_remove(args):
+    removed = remove_alert(args.target)
+    if removed:
+        print("Removed %d alert(s)" % removed)
+        return 0
+    print("no alert matches %r" % args.target, file=sys.stderr)
+    return 1
+
+
+def cmd_alert_list(args):
+    rules = load_alerts()
+    if not rules:
+        print("No alerts set. Add one with: "
+              "python -m stocks alert add NVDA below 150")
+        return 0
+    for rule in rules:
+        print("#%-3d %s" % (rule["id"], describe(rule)))
+    return 0
+
+
+def cmd_alerts_check(args):
+    rules = load_alerts()
+    if not rules:
+        print("No alerts set. Add one with: "
+              "python -m stocks alert add NVDA below 150")
+        return 0
+    symbols = sorted({rule["symbol"] for rule in rules})
+    failures = []
+    print("Fetching %d quotes..." % len(symbols), file=sys.stderr)
+    quotes = fetch_quotes(symbols, on_error=lambda s, m: failures.append((s, m)))
+
+    results = check_alerts(rules, quotes)
+    fired = [(r, d) for r, t, d in results if t]
+    quiet = [(r, d) for r, t, d in results if t is False]
+    unknown = [(r, d) for r, t, d in results if t is None]
+
+    if fired:
+        print()
+        print("TRIGGERED:")
+        for rule, detail in fired:
+            print("  ! #%d %s  (%s)" % (rule["id"], describe(rule), detail))
+    else:
+        print()
+        print("No alerts triggered.")
+    if quiet and args.verbose:
+        print("Not triggered:")
+        for rule, detail in quiet:
+            print("    #%d %s  (%s)" % (rule["id"], describe(rule), detail))
+    for rule, detail in unknown:
+        print("warning: #%d %s: %s" % (rule["id"], describe(rule), detail),
+              file=sys.stderr)
+    for symbol, message in failures:
+        print("warning: %s: %s" % (symbol, message), file=sys.stderr)
+    return 0 if not fired else 2
+
+
 def cmd_list(args):
     for sector, entries in load_watchlist().items():
         print("%s:" % sector)
@@ -175,6 +284,33 @@ def main(argv=None):
 
     p_list = sub.add_parser("list", help="show the watchlist without fetching")
     p_list.set_defaults(func=cmd_list)
+
+    p_rec = sub.add_parser(
+        "recommend",
+        help="rank the watchlist by mechanical trend/momentum/RSI signals")
+    p_rec.add_argument("--json", action="store_true", help="machine-readable output")
+    p_rec.set_defaults(func=cmd_recommend, json=False)
+
+    p_alert = sub.add_parser("alert", help="manage price alerts")
+    alert_sub = p_alert.add_subparsers(dest="alert_command", required=True)
+    p_aa = alert_sub.add_parser(
+        "add", help="e.g.: alert add NVDA below 150 | alert add MSFT drop 15")
+    p_aa.add_argument("symbol")
+    p_aa.add_argument("kind", choices=["above", "below", "drop", "day"])
+    p_aa.add_argument("value", type=float,
+                      help="price for above/below, percent for drop/day")
+    p_aa.set_defaults(func=cmd_alert_add)
+    p_ar = alert_sub.add_parser("remove", help="remove by alert id or symbol")
+    p_ar.add_argument("target")
+    p_ar.set_defaults(func=cmd_alert_remove)
+    p_al = alert_sub.add_parser("list", help="show configured alerts")
+    p_al.set_defaults(func=cmd_alert_list)
+
+    p_check = sub.add_parser(
+        "alerts", help="check all alerts now (exit code 2 when any trigger)")
+    p_check.add_argument("--verbose", action="store_true",
+                         help="also show alerts that did not trigger")
+    p_check.set_defaults(func=cmd_alerts_check)
 
     args = parser.parse_args(argv)
     if not args.command:

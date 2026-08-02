@@ -105,7 +105,25 @@ python -m stocks remove MRNA
 # Value your actual Degiro holdings:
 #   cp portfolio.example.csv portfolio.csv   # then fill in your positions
 python -m stocks portfolio
+
+# Rank the watchlist by mechanical trend/momentum/RSI signals, with the
+# reasoning for every point of the score printed out.
+python -m stocks recommend
+
+# Price alerts (saved to stocks_alerts.json):
+python -m stocks alert add NVDA below 150   # buy-the-dip target price
+python -m stocks alert add MSFT above 600   # breakout / take-profit price
+python -m stocks alert add AMGN drop 15     # 15%+ below its 52-week high
+python -m stocks alert add PLTR day 5       # daily move of 5%+ either way
+python -m stocks alert list
+python -m stocks alert remove 3             # by id, or by symbol
+python -m stocks alerts                     # check them all now
+python -m stocks alerts --verbose           # also show the quiet ones
 ```
+
+`alerts` exits with code 2 when anything triggers, so you can wire it into
+cron or a shell loop for notifications, e.g.
+`python -m stocks alerts || notify-send "stock alert"`.
 
 The default watchlist covers Software (MSFT, GOOGL, ORCL, CRM, ADBE, NOW),
 AI & Semiconductors (NVDA, AMD, AVGO, TSM, PLTR, ARM), Biotech (AMGN, VRTX,
@@ -117,8 +135,15 @@ gain in USD, plus totals in EUR at the live EURUSD rate. `portfolio.csv`
 and `stocks_watchlist.json` are gitignored so your personal data stays off
 GitHub.
 
-This is an informational tracker, not investment advice — quotes are
-end-of-day/delayed and can differ slightly from what Degiro shows.
+The watch table also shows each stock's 14-day RSI (classically, below 30
+is "oversold" and above 70 "overbought") next to the 50/200-day trend.
+`recommend` combines those same signals — trend, 1-month and YTD momentum,
+distance from the 52-week high, RSI — into a transparent score where every
+point comes with a printed reason.
+
+This is an informational tracker, not investment advice — the
+"recommendations" are mechanical technical signals, quotes are
+end-of-day/delayed, and none of it knows your finances or risk tolerance.
 
 ## What this tool will not do
 
