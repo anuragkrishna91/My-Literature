@@ -6,6 +6,10 @@ metadata.jsonl
 # Browser session profile — contains login cookies. Never commit.
 .my-literature/
 
+# Stock tracker — your personal holdings and watchlist edits stay local.
+portfolio.csv
+stocks_watchlist.json
+
 # Python
 __pycache__/
 *.pyc

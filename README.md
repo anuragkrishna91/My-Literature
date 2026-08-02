@@ -84,6 +84,42 @@ new_pdfs = [r.path for r in results if r.status == "downloaded"]
 See `docs/integrate-rag.md` for the full wiring (e.g. a "Download OA PDFs into
 corpus" button alongside a Zotero sync).
 
+## Stock tracker (`stocks/`)
+
+A separate small tool in this repo for tracking US-listed software, AI,
+biotech, and medicine stocks — a companion to a Degiro account. It uses free
+public quote endpoints (Yahoo Finance, falling back to Stooq), needs no API
+key, and only requires `requests`.
+
+```bash
+# Show the sector watchlist: price, day/1-month/YTD change, 52-week range,
+# distance from the 52-week high, and 50/200-day trend.
+python -m stocks watch          # or just: python -m stocks
+python -m stocks watch --json   # machine-readable
+
+# See or edit the watchlist (edits are saved to stocks_watchlist.json)
+python -m stocks list
+python -m stocks add SHOP --sector "Software" --name "Shopify"
+python -m stocks remove MRNA
+
+# Value your actual Degiro holdings:
+#   cp portfolio.example.csv portfolio.csv   # then fill in your positions
+python -m stocks portfolio
+```
+
+The default watchlist covers Software (MSFT, GOOGL, ORCL, CRM, ADBE, NOW),
+AI & Semiconductors (NVDA, AMD, AVGO, TSM, PLTR, ARM), Biotech (AMGN, VRTX,
+REGN, GILD, MRNA, CRSP), and Medicine & Healthcare (LLY, NVO, JNJ, MRK,
+ABBV, ISRG, UNH). For the portfolio, record each position's ticker, share
+count, and your average USD purchase price (Degiro shows this as the
+position's break-even/GAK price); the tool prints per-position and total
+gain in USD, plus totals in EUR at the live EURUSD rate. `portfolio.csv`
+and `stocks_watchlist.json` are gitignored so your personal data stays off
+GitHub.
+
+This is an informational tracker, not investment advice — quotes are
+end-of-day/delayed and can differ slightly from what Degiro shows.
+
 ## What this tool will not do
 
 - Store or type your university password.

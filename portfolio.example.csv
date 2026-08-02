@@ -1,0 +1,10 @@
+# Copy this file to portfolio.csv and fill in your real Degiro positions.
+# - symbol: the US ticker as listed on NASDAQ/NYSE
+# - shares: how many you hold (fractions allowed)
+# - cost_per_share_usd: your average purchase price in USD
+#   (Degiro shows this per position as "GAK" / break-even price)
+# portfolio.csv is gitignored so your holdings stay off GitHub.
+symbol,shares,cost_per_share_usd
+MSFT,2,415.30
+NVDA,5,118.50
+AMGN,3,310.00
