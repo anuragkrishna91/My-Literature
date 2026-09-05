@@ -81,6 +81,16 @@ dark-storage recovery) · Compare · Arrhenius (Ea, acceleration factors)
 · Energy yield (measured + projected) · Imaging (PL/EL/DLIT) · Forecast
 (XGBoost) · Report (corpus-grounded analysis + ISOS summary table)
 
+### 🏠 Hub › Maintenance & health
+Below the instruments: **Golden runs** (run the nine self-checks and see
+the PASS/FAIL table; the last result is kept), **Library index** (documents
+on disk, index age, files newer than the index, one-click re-index and
+backup in the background with logs), **Claude access & versions** (newest
+Claude Code found and whether it suits Fable 5.1, package versions, disk
+use), **Jobs** (rewrites, reviews, career documents and responses in
+progress or recently completed) and **What's new** (where each recent
+feature lives).
+
 ### 📝 Track Changes, references, submission packet, watch impact
 - **Word Track Changes**: the rewrite results offer "Tracked changes vs the
   original" and the response mode offers "Revised manuscript with Word Track

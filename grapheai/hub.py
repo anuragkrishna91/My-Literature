@@ -142,6 +142,165 @@ def days_left(deadline):
 
 
 # --------------------------------------------------------------------------
+# Maintenance helpers (no AI calls)
+# --------------------------------------------------------------------------
+GOLDEN_LAST = ANSWERS_DIR / "golden_runs_last.json"
+MAX_CLI_MIN_VERSION = "2.1.251"
+
+WHATS_NEW = [
+    ("Workbench › Review › 🧬 Rewrite", "Library grounding: passages from your corpus cited as [Ln], "
+     "positioning map, referee novelty check, 📚 Library tab with reference export"),
+    ("Workbench › Review › 🧬 Rewrite", "CSV/XLSX data tables (and PeroDeg/Analytics exports) become "
+     "file-backed data figures; figure-plan checkpoint; redraw any figure with feedback"),
+    ("Workbench › Review › 🧬 Rewrite", "PV reporting checklist, submission packet (cover letter, "
+     "reviewer profiles, limits check), Word Track Changes vs the original"),
+    ("Workbench › Review › 📨 Respond to reviewers", "Reviews → approved point list → grounded responses → "
+     "exact changes applied → before/after diff → Word bundle with Track Changes"),
+    ("Workbench › every result", "💬 Follow-up conversation: say what is wrong, add facts, get exact "
+     "edits applied and the document rebuilt"),
+    ("Workbench › 🏆 Proposal", "ESR-calibrated mock evaluation (your past ESRs), consistency audit "
+     "(objectives × WPs, dates, effort), Gantt & WP figures + tables"),
+    ("Workbench › 📬 Watch", "New papers checked against manuscripts, reviews and proposals in progress"),
+    ("Workbench › 🖼️ Figures › Figure Studio", "PNG + SVG + PDF, journal panel styles, visual QA on the "
+     "API backend and through Claude Code on the Max backend"),
+    ("Venture Studio › Roadmap", "Grant-to-startup roadmap with decision gates; milestones join the Gantt"),
+    ("All apps", "Newest Claude Code found is used for Max mode; version shown in the sidebar"),
+    ("Here (Hub)", "Golden runs self-test, index freshness, re-index, backup now, jobs in progress"),
+]
+
+
+def run_golden():
+    """Run golden_runs.py, parse PASS/FAIL lines, persist the result."""
+    script = HERE / "golden_runs.py"
+    if not script.exists():
+        return {"error": "golden_runs.py not found next to hub.py"}
+    try:
+        proc = subprocess.run([sys.executable, str(script)], cwd=str(HERE),
+                              capture_output=True, text=True, timeout=900)
+    except subprocess.TimeoutExpired:
+        return {"error": "golden runs exceeded 15 minutes"}
+    rows = []
+    for ln in (proc.stdout or "").splitlines():
+        m = re.match(r"\s*(PASS|FAIL)\s+(.+?)\s{2,}(\S.*)$", ln)
+        if m:
+            rows.append({"status": m.group(1), "check": m.group(2).strip(),
+                         "info": m.group(3).strip()})
+    rec = {"time": datetime.datetime.now().isoformat(timespec="seconds"),
+           "rows": rows, "exit": proc.returncode,
+           "passed": sum(1 for r in rows if r["status"] == "PASS"), "total": len(rows),
+           "tail": (proc.stdout or "")[-1500:] + ("\n" + proc.stderr[-1500:] if proc.stderr else "")}
+    try:
+        ANSWERS_DIR.mkdir(parents=True, exist_ok=True)
+        GOLDEN_LAST.write_text(json.dumps(rec, indent=1), encoding="utf-8")
+    except Exception:
+        pass
+    return rec
+
+
+def _ver_tuple(v):
+    return tuple(int(x) for x in re.findall(r"\d+", str(v))[:3]) or (0,)
+
+
+def claude_code_versions():
+    """[(origin, path, version)] for the Claude Code binaries Max mode can use."""
+    import shutil
+    out = []
+    cands = []
+    try:
+        import claude_agent_sdk
+        b = Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"
+        if b.is_file():
+            cands.append(("bundled in claude-agent-sdk", str(b)))
+    except Exception:
+        pass
+    home = Path.home()
+    for p in [shutil.which("claude"), home / ".claude/local/claude", home / ".npm-global/bin/claude",
+              "/usr/local/bin/claude", "/opt/homebrew/bin/claude"]:
+        p = str(p) if p else ""
+        if p and Path(p).is_file() and p not in {c[1] for c in cands}:
+            cands.append(("installed claude", p))
+    for origin, p in cands:
+        try:
+            v = subprocess.run([p, "--version"], capture_output=True, text=True, timeout=20).stdout
+            m = re.search(r"(\d+)\.(\d+)\.(\d+)", v or "")
+            out.append((origin, p, m.group(0) if m else "?"))
+        except Exception:
+            out.append((origin, p, "?"))
+    return out
+
+
+def package_versions():
+    vers = {}
+    for name in ("anthropic", "claude_agent_sdk", "streamlit", "chromadb", "matplotlib", "openpyxl"):
+        try:
+            mod = __import__(name)
+            vers[name] = getattr(mod, "__version__", "installed")
+        except Exception:
+            vers[name] = "not installed"
+    return vers
+
+
+def index_freshness():
+    """PDF count on disk, files newer than the index, index age."""
+    try:
+        import config
+        pdf_dir = Path(config.PDF_DIR)
+        db_dir = Path(config.DB_DIR)
+    except Exception:
+        return None
+    files = [p for p in pdf_dir.rglob("*") if p.is_file()
+             and p.suffix.lower() in (".pdf", ".docx", ".txt", ".md")] if pdf_dir.exists() else []
+    idx_ts = None
+    if db_dir.exists():
+        try:
+            idx_ts = max((p.stat().st_mtime for p in db_dir.rglob("*") if p.is_file()), default=None)
+        except Exception:
+            idx_ts = None
+    newer = [p for p in files if idx_ts and p.stat().st_mtime > idx_ts]
+    return {"n_files": len(files), "index_time": datetime.datetime.fromtimestamp(idx_ts) if idx_ts else None,
+            "newer": newer[:20], "n_newer": len(newer), "pdf_dir": pdf_dir}
+
+
+def jobs_in_progress():
+    rows = []
+    for sub, kind in (("rewrite_jobs", "rewrite"), ("review_jobs", "review / career doc"),
+                      ("revision_jobs", "response to reviewers")):
+        d = ANSWERS_DIR / sub
+        if not d.exists():
+            continue
+        for p in sorted(d.glob("*/state.json"), key=lambda q: q.stat().st_mtime, reverse=True)[:30]:
+            s = _read_json(p, {})
+            if not s:
+                continue
+            inp, opts = s.get("inputs", {}) or {}, s.get("opts", {}) or {}
+            name = (inp.get("ms_name") or opts.get("synopsis") or opts.get("brief") or p.parent.name)
+            rows.append({"kind": kind, "document": str(name)[:70], "status": s.get("status", "?"),
+                         "updated": datetime.datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
+                         "figures": len((s.get("stages", {}) or {}).get("figures", {}) or {}),
+                         "job": p.parent.name})
+    rows.sort(key=lambda r: r["updated"], reverse=True)
+    return rows
+
+
+def dir_size_mb(path):
+    try:
+        return sum(p.stat().st_size for p in Path(path).rglob("*") if p.is_file()) / 1e6
+    except Exception:
+        return 0.0
+
+
+def start_background(pyfile, logname):
+    """Run a maintenance script detached, logging to answers/<logname>."""
+    log = ANSWERS_DIR / logname
+    ANSWERS_DIR.mkdir(parents=True, exist_ok=True)
+    with open(log, "ab") as fh:
+        fh.write(f"\n=== started {datetime.datetime.now():%Y-%m-%d %H:%M:%S} ===\n".encode())
+        subprocess.Popen([sys.executable, str(HERE / pyfile)], cwd=str(HERE),
+                         stdout=fh, stderr=subprocess.STDOUT, start_new_session=True)
+    return log
+
+
+# --------------------------------------------------------------------------
 # Unified search over answers/
 # --------------------------------------------------------------------------
 SEARCH_EXT = (".md", ".txt", ".csv", ".docx")
@@ -387,6 +546,108 @@ with right:
                 unsafe_allow_html=True)
     else:
         st.caption("No PV Radar items yet.")
+
+st.markdown("---")
+
+# ------------------------------ maintenance & health ----------------------
+st.markdown("## 🧪 Maintenance & health")
+m1, m2, m3 = st.columns([2, 2, 2], gap="large")
+
+with m1:
+    st.markdown("### Golden runs")
+    st.caption("Nine deterministic checks of the Workbench machinery (sandbox, audits, "
+               "figure stage, checklist, consistency, edits, diff, library, Track "
+               "Changes). No AI calls; ~20 s. Run after every update.")
+    last = _read_json(GOLDEN_LAST, None)
+    if st.button("▶ Run golden runs now", key="golden_go", use_container_width=True):
+        with st.spinner("Running golden runs..."):
+            last = run_golden()
+    if last:
+        if last.get("error"):
+            st.error(last["error"])
+        else:
+            ok = last.get("passed", 0) == last.get("total", 0) and last.get("total", 0) > 0
+            (st.success if ok else st.error)(
+                f"{last.get('passed', 0)}/{last.get('total', 0)} passed · "
+                f"{str(last.get('time', ''))[:16].replace('T', ' ')}")
+            if last.get("rows"):
+                st.dataframe(last["rows"], use_container_width=True, hide_index=True)
+            if not ok:
+                with st.expander("Output"):
+                    st.code(last.get("tail", ""), language=None)
+    else:
+        st.caption("Never run.")
+
+with m2:
+    st.markdown("### Library index")
+    fr = index_freshness()
+    if fr:
+        st.metric("Documents in papers/", f"{fr['n_files']:,}")
+        st.caption(f"Index built {_age_str(fr['index_time'])}"
+                   + (f" · **{fr['n_newer']} file(s) newer than the index**" if fr["n_newer"] else
+                      " · nothing newer than the index"))
+        if fr["n_newer"]:
+            with st.expander("Newer files"):
+                for p in fr["newer"]:
+                    st.caption(str(p.relative_to(fr["pdf_dir"])))
+    else:
+        st.caption("config.py not importable - index status unavailable.")
+    if st.button("🔁 Re-index the library (background)", key="reindex_go",
+                 use_container_width=True, disabled=not (HERE / "ingest.py").exists()):
+        log = start_background("ingest.py", "ingest_hub.log")
+        st.toast(f"Indexing started - log: {log.name}")
+    if st.button("💾 Back up now (background)", key="backup_go", use_container_width=True,
+                 disabled=not (HERE / "backup.py").exists()):
+        log = start_background("backup.py", "backup_hub.log")
+        st.toast(f"Backup started - log: {log.name}")
+    for logname in ("ingest_hub.log", "backup_hub.log"):
+        lp = ANSWERS_DIR / logname
+        if lp.exists():
+            with st.expander(f"{logname} ({_age_str(file_age(lp))})"):
+                try:
+                    st.code(lp.read_text(encoding="utf-8", errors="replace")[-2500:], language=None)
+                except Exception:
+                    pass
+
+with m3:
+    st.markdown("### Claude access & versions")
+    ccs = claude_code_versions()
+    if ccs:
+        best = max(ccs, key=lambda c: _ver_tuple(c[2]))
+        ok = _ver_tuple(best[2]) >= _ver_tuple(MAX_CLI_MIN_VERSION)
+        (st.success if ok else st.warning)(
+            f"Claude Code {best[2]} ({best[0]}) - "
+            + ("fine for Fable 5.1" if ok else
+               f"older than {MAX_CLI_MIN_VERSION}: run "
+               f"`{sys.executable} -m pip install -U claude-agent-sdk`"))
+        if len(ccs) > 1:
+            st.caption(" · ".join(f"{o}: {v}" for o, _p, v in ccs))
+    else:
+        st.caption("No Claude Code found (Max mode needs `pip install claude-agent-sdk`).")
+    pv = package_versions()
+    st.caption(" · ".join(f"{k} {v}" for k, v in pv.items()))
+    st.caption(f"answers/ {dir_size_mb(ANSWERS_DIR):,.0f} MB")
+    try:
+        import config as _cfg
+        st.caption(f"chroma_db/ {dir_size_mb(_cfg.DB_DIR):,.0f} MB")
+    except Exception:
+        pass
+
+jobs_rows = jobs_in_progress()
+if jobs_rows:
+    open_rows = [r for r in jobs_rows if r["status"] != "complete"]
+    st.markdown(f"### Jobs ({len(open_rows)} in progress, {len(jobs_rows) - len(open_rows)} "
+                "completed recently)")
+    st.caption("Resume an unfinished job from its panel in the Workbench (Review › Rewrite / "
+               "Respond, Draft › Review writer, Career).")
+    st.dataframe(jobs_rows[:20], use_container_width=True, hide_index=True)
+
+with st.expander("✨ What's new in this build"):
+    for where, what in WHATS_NEW:
+        st.markdown(f"- **{where}** - {what}")
+    guide = ANSWERS_DIR / "SYSTEM_GUIDE.md"
+    if guide.exists():
+        st.caption("Full guide: answers/SYSTEM_GUIDE.md")
 
 st.markdown("---")
 
