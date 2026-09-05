@@ -1,0 +1,417 @@
+"""
+GrapheAI Hub - the front door of the platform.
+
+One screen: every instrument with live running status and a start
+button, corpus + spend + backup + nightly-job health, the next funding
+deadlines, the latest PV Radar signals, and a unified search across
+everything the platform has ever written into answers/.
+
+Run with:
+    streamlit run hub.py --server.port 8500
+
+Makes NO Claude calls - it only reads the stores the other instruments
+write, so it opens in a second and costs nothing.
+"""
+
+import datetime
+import json
+import re
+import socket
+import subprocess
+import sys
+from pathlib import Path
+
+import streamlit as st
+
+HERE = Path(__file__).parent
+ANSWERS_DIR = HERE / "answers"
+
+THEME_FLAGS = ["--theme.base", "dark",
+               "--theme.primaryColor", "#FF6B3D",
+               "--theme.backgroundColor", "#12161C",
+               "--theme.secondaryBackgroundColor", "#1B222B",
+               "--theme.textColor", "#E6EAF0"]
+
+INSTRUMENTS = [
+    ("✍️", "Workbench", "workbench.py", 8501,
+     "literature → manuscripts → proposals"),
+    ("📡", "PV Radar", "pvradar.py", 8502,
+     "news, patents & market intel"),
+    ("🧱", "Material Library", "materials.py", 8503,
+     "materials from the corpus"),
+    ("🔋", "PeroDeg", "perodeg.py", 8504,
+     "degradation & outdoor analytics"),
+    ("📊", "Analytics", "analytics.py", 8505,
+     "any-schema extraction + plots"),
+    ("💶", "Funding Radar", "fundradar.py", 8506,
+     "calls, deadlines & fit memos"),
+    ("🎤", "Slide Studio", "slides.py", 8507,
+     "decks from your outputs"),
+    ("📉", "TechnoEcon", "technoecon.py", 8508,
+     "LCOE & cost modelling"),
+    ("🧪", "Experiment Planner", "expplan.py", 8509,
+     "DoE + Bayesian suggestions"),
+    ("📈", "Impact Tracker", "impact.py", 8510,
+     "citations & track record"),
+    ("🚀", "Venture Studio", "venture.py", 8511,
+     "business case, IP & roadmap"),
+]
+
+
+def port_up(port):
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.25):
+            return True
+    except OSError:
+        return False
+
+
+def start_app(pyfile, port):
+    subprocess.Popen(
+        [sys.executable, "-m", "streamlit", "run", str(HERE / pyfile),
+         "--server.port", str(port), "--server.headless", "true",
+         *THEME_FLAGS],
+        cwd=str(HERE), start_new_session=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _read_json(path, default):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+
+def _age_str(ts):
+    if ts is None:
+        return "never"
+    delta = datetime.datetime.now() - ts
+    h = delta.total_seconds() / 3600
+    if h < 1:
+        return f"{int(delta.total_seconds() / 60)} min ago"
+    if h < 48:
+        return f"{h:.0f} h ago"
+    return f"{h / 24:.0f} days ago"
+
+
+def file_age(path):
+    p = Path(path)
+    if not p.exists():
+        return None
+    return datetime.datetime.fromtimestamp(p.stat().st_mtime)
+
+
+def newest_backup():
+    icloud = (Path.home() / "Library" / "Mobile Documents"
+              / "com~apple~CloudDocs" / "PaperRagBackups")
+    local = Path.home() / "PaperRagBackups"
+    zips = []
+    for d in (icloud, local):
+        if d.exists():
+            zips += list(d.glob("paperrag_backup_*.zip"))
+    if not zips:
+        return None, None
+    z = max(zips, key=lambda p: p.stat().st_mtime)
+    return z, datetime.datetime.fromtimestamp(z.stat().st_mtime)
+
+
+def launchd_status():
+    """{label: 'ok'|'error <code>'} for the grapheai jobs (macOS)."""
+    try:
+        out = subprocess.run(["launchctl", "list"], capture_output=True,
+                             text=True, timeout=5).stdout
+    except Exception:
+        return {}
+    jobs = {}
+    for line in out.splitlines():
+        if "grapheai" in line:
+            parts = line.split()
+            if len(parts) >= 3:
+                code = parts[1]
+                jobs[parts[2]] = ("ok" if code in ("0", "-")
+                                  else f"exit {code}")
+    return jobs
+
+
+def days_left(deadline):
+    try:
+        d = datetime.date.fromisoformat(str(deadline)[:10])
+        return (d - datetime.date.today()).days
+    except Exception:
+        return None
+
+
+# --------------------------------------------------------------------------
+# Unified search over answers/
+# --------------------------------------------------------------------------
+SEARCH_EXT = (".md", ".txt", ".csv", ".docx")
+MAX_FILE_BYTES = 2_000_000
+
+
+def _answers_signature():
+    if not ANSWERS_DIR.exists():
+        return 0
+    sig = 0
+    for p in ANSWERS_DIR.rglob("*"):
+        if p.is_file() and p.suffix.lower() in SEARCH_EXT:
+            sig ^= hash((str(p), p.stat().st_mtime_ns))
+    return sig
+
+
+@st.cache_data(show_spinner=False)
+def load_search_corpus(signature):
+    """[(relpath, mtime, text)] for every searchable file in answers/."""
+    del signature  # cache key only
+    out = []
+    if not ANSWERS_DIR.exists():
+        return out
+    for p in sorted(ANSWERS_DIR.rglob("*"),
+                    key=lambda q: q.stat().st_mtime if q.is_file()
+                    else 0, reverse=True):
+        if (not p.is_file() or p.suffix.lower() not in SEARCH_EXT
+                or p.stat().st_size > MAX_FILE_BYTES
+                or p.name.startswith("~$")):
+            continue
+        try:
+            if p.suffix.lower() == ".docx":
+                from docx import Document
+                doc = Document(p)
+                text = "\n".join(q.text for q in doc.paragraphs
+                                 if q.text.strip())
+            else:
+                text = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        out.append((str(p.relative_to(ANSWERS_DIR)),
+                    p.stat().st_mtime, text))
+        if len(out) >= 3000:
+            break
+    return out
+
+
+def search_answers(query, corpus, limit=40):
+    ql = query.lower()
+    hits = []
+    for rel, mtime, text in corpus:
+        low = text.lower()
+        idx = low.find(ql)
+        in_name = ql in rel.lower()
+        if idx == -1 and not in_name:
+            continue
+        if idx == -1:
+            snippet = text[:220]
+        else:
+            a = max(0, idx - 110)
+            snippet = ("…" if a else "") + text[a:idx + 160] + "…"
+        snippet = re.sub(r"\s+", " ", snippet).strip()
+        hits.append({"file": rel, "mtime": mtime, "snippet": snippet,
+                     "count": low.count(ql) + (1 if in_name else 0)})
+        if len(hits) >= limit:
+            break
+    return hits
+
+
+# --------------------------------------------------------------------------
+# Page
+# --------------------------------------------------------------------------
+st.set_page_config(page_title="GrapheAI Hub", page_icon="🏠",
+                   layout="wide")
+
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Serif:wght@600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
+html, body, [class*="css"], .stMarkdown, p, li {
+    font-family: 'IBM Plex Sans', 'Segoe UI', sans-serif;
+    font-size: 16.5px; color: #E6EAF0;
+}
+.stApp { background: #12161C; }
+.an-header { border-bottom: 3px solid #FF6B3D; padding-bottom: 12px;
+             margin-bottom: 10px; }
+.an-title  { font-family: 'IBM Plex Serif', Georgia, serif;
+             font-size: 2.6rem; font-weight: 600; color: #F4F6F9;
+             margin: 0; letter-spacing: -0.5px; }
+.an-sub    { font-size: 0.82rem; color: #8E99A8; margin-top: 6px;
+             text-transform: uppercase; letter-spacing: 2px; }
+.an-sub b  { color: #FF8A5C; font-weight: 600; }
+h2 { font-family: 'IBM Plex Serif', Georgia, serif; font-weight: 600;
+     color: #DFE5EC; }
+h3 { color: #C3CBD6; }
+.tool-card { background: #1A212B; border: 1px solid #263140;
+    border-radius: 14px; padding: 14px 16px 10px 16px;
+    margin-bottom: 10px; }
+.tool-name { font-size: 1.12rem; font-weight: 600; color: #F4F6F9; }
+.tool-desc { font-size: .85rem; color: #8E99A8; margin: 2px 0 8px 0; }
+.dot-on  { color: #4ADE80; } .dot-off { color: #5A6675; }
+[data-testid="stMetric"] { background: #1A212B; border: 1px solid #263140;
+    border-radius: 12px; padding: .7rem .95rem; }
+[data-testid="stMetricValue"] { font-family: 'IBM Plex Mono', monospace;
+                                color: #FF8A5C; font-size: 1.35rem; }
+[data-testid="stMetricLabel"] { color: #8E99A8; text-transform: uppercase;
+    letter-spacing: 1px; font-size: .78rem; }
+.stButton>button { font-size: .92rem; font-weight: 600;
+    border-radius: 10px; padding: 0.3rem 0.9rem; }
+details { border: 1px solid #263140; border-radius: 12px;
+          background: #1A212B; }
+[data-testid="stDataFrame"] { border: 1px solid #263140;
+                              border-radius: 12px; }
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown(
+    "<div class='an-header'>"
+    "<p class='an-title'>🏠 GrapheAI</p>"
+    "<p class='an-sub'>research platform hub · developed by "
+    "<b>Dr. Anurag Krishna</b></p>"
+    "</div>",
+    unsafe_allow_html=True)
+
+# ------------------------------ health row --------------------------------
+c1, c2, c3, c4, c5 = st.columns(5)
+
+with c1:
+    try:
+        import chromadb
+        import config
+        client = chromadb.PersistentClient(path=str(config.DB_DIR))
+        n_chunks = client.get_collection(config.COLLECTION_NAME).count()
+        st.metric("Corpus chunks", f"{n_chunks:,}")
+    except Exception:
+        st.metric("Corpus chunks", "—")
+
+with c2:
+    spend = _read_json(ANSWERS_DIR / "spend.json", {})
+    month = datetime.date.today().strftime("%Y-%m")
+    st.metric("API spend " + month,
+              f"${float(spend.get(month, 0.0)):.2f}")
+
+with c3:
+    zpath, zts = newest_backup()
+    st.metric("Last backup", _age_str(zts))
+
+with c4:
+    st.metric("Radar refresh",
+              _age_str(file_age(ANSWERS_DIR / "radar_refresh.log")))
+
+with c5:
+    st.metric("Analytics refresh",
+              _age_str(file_age(ANSWERS_DIR / "analytics_refresh.log")))
+
+jobs = launchd_status()
+if jobs:
+    bad = {k: v for k, v in jobs.items() if v != "ok"}
+    if bad:
+        st.error("launchd job problem: "
+                 + ", ".join(f"{k} ({v})" for k, v in bad.items()))
+    else:
+        st.caption("launchd: " + " · ".join(f"{k} ✓" for k in jobs))
+else:
+    st.caption("launchd status unavailable (not macOS, or launchctl "
+               "not readable).")
+
+st.markdown("---")
+
+left, right = st.columns([3, 2], gap="large")
+
+# ------------------------------ instruments -------------------------------
+with left:
+    st.markdown("## Instruments")
+    if st.button("🔄 Refresh statuses", key="hub_refresh"):
+        st.rerun()
+    for row_start in range(0, len(INSTRUMENTS), 2):
+        cols = st.columns(2)
+        for col, inst in zip(cols,
+                             INSTRUMENTS[row_start:row_start + 2]):
+            emoji, name, pyfile, port, desc = inst
+            exists = (HERE / pyfile).exists()
+            up = port_up(port) if exists else False
+            with col:
+                dot = ("<span class='dot-on'>●</span>" if up
+                       else "<span class='dot-off'>●</span>")
+                st.markdown(
+                    f"<div class='tool-card'>"
+                    f"<div class='tool-name'>{dot} {emoji} {name} "
+                    f"<span style='color:#5A6675;font-size:.8rem'>"
+                    f":{port}</span></div>"
+                    f"<div class='tool-desc'>{desc}</div></div>",
+                    unsafe_allow_html=True)
+                b1, b2 = st.columns(2)
+                with b1:
+                    if up:
+                        st.link_button("↗ Open",
+                                       f"http://localhost:{port}",
+                                       use_container_width=True)
+                    elif exists:
+                        if st.button("▶ Start", key=f"start_{port}",
+                                     use_container_width=True):
+                            start_app(pyfile, port)
+                            st.toast(f"Starting {name} — give it a few "
+                                     "seconds, then Refresh statuses.")
+                    else:
+                        st.button("missing", key=f"miss_{port}",
+                                  disabled=True,
+                                  use_container_width=True)
+
+# ------------------------------ right column ------------------------------
+with right:
+    st.markdown("## Next deadlines")
+    board = _read_json(ANSWERS_DIR / "funding" / "board.json",
+                       {}).get("board", [])
+    upcoming = []
+    for c in board:
+        if c.get("status") == "Dropped":
+            continue
+        dl = days_left(c.get("deadline"))
+        if dl is not None and dl >= 0:
+            upcoming.append((dl, c))
+    upcoming.sort(key=lambda x: x[0])
+    if not upcoming:
+        st.caption("No upcoming deadlines on the Funding Radar board.")
+    for dl, c in upcoming[:4]:
+        urgent = "🔴" if dl <= 30 else ("🟠" if dl <= 90 else "🟢")
+        st.markdown(
+            f"{urgent} **{dl} days** — "
+            f"{(c.get('identifier') or '')} "
+            f"{str(c.get('title', ''))[:70]}")
+
+    st.markdown("## Latest radar signals")
+    news = _read_json(ANSWERS_DIR / "pv_radar.json", [])
+    if isinstance(news, list) and news:
+        def _dt(item):
+            return str(item.get("date", ""))
+        for item in sorted(news, key=_dt, reverse=True)[:5]:
+            st.markdown(
+                f"- **{str(item.get('category', '?'))}** · "
+                f"{str(item.get('title', ''))[:90]} "
+                f"<span style='color:#5A6675;font-size:.8rem'>"
+                f"{str(item.get('date', ''))[:10]}</span>",
+                unsafe_allow_html=True)
+    else:
+        st.caption("No PV Radar items yet.")
+
+st.markdown("---")
+
+# ------------------------------ unified search ----------------------------
+st.markdown("## 🔍 Search everything GrapheAI has written")
+st.caption("Full-text search across every report, memo, dataset, note "
+           "and answer in answers/ — Markdown, text, CSV and Word.")
+q = st.text_input("Search", key="hub_q",
+                  placeholder="e.g. buried interface, LAPERITIVO, "
+                              "T80, NiO ...")
+if q and len(q.strip()) >= 2:
+    with st.spinner("Searching..."):
+        corpus = load_search_corpus(_answers_signature())
+        hits = search_answers(q.strip(), corpus)
+    st.caption(f"{len(hits)} file(s) matched"
+               + (" (showing first 40)" if len(hits) >= 40 else ""))
+    for h in hits:
+        ts = datetime.datetime.fromtimestamp(h["mtime"])
+        with st.expander(f"📄 {h['file']} — {h['count']} match(es) · "
+                         f"{ts:%Y-%m-%d}"):
+            st.markdown(h["snippet"])
+            st.code(str(ANSWERS_DIR / h["file"]), language=None)
+elif q:
+    st.caption("Type at least 2 characters.")
+
+st.markdown("---")
+st.caption("GrapheAI Hub makes no AI calls - it only reads what the "
+           "other instruments store. Guide: answers/SYSTEM_GUIDE.md")
