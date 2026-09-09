@@ -148,6 +148,7 @@ GOLDEN_LAST = ANSWERS_DIR / "golden_runs_last.json"
 MAX_CLI_MIN_VERSION = "2.1.251"
 
 WHATS_NEW = [
+    ("All apps", "ChatGPT subscription backend: GPT-5.6 family and GPT-6-Astra through OpenAI's Codex CLI signed in with your ChatGPT Pro account (no API key); OpenAI API-key backend for any account model"),
     ("Workbench › Review › 🧬 Rewrite", "Library grounding: passages from your corpus cited as [Ln], "
      "positioning map, referee novelty check, 📚 Library tab with reference export"),
     ("Workbench › Review › 🧬 Rewrite", "CSV/XLSX data tables (and PeroDeg/Analytics exports) become "
@@ -226,6 +227,34 @@ def claude_code_versions():
             out.append((origin, p, m.group(0) if m else "?"))
         except Exception:
             out.append((origin, p, "?"))
+    return out
+
+
+def codex_cli_versions():
+    """[(origin, path, version, login_text)] for Codex CLI binaries (ChatGPT backend)."""
+    import shutil, glob
+    home = Path.home()
+    cands = []
+    w = shutil.which("codex")
+    if w:
+        cands.append(("on PATH", w))
+    for p in ["/opt/homebrew/bin/codex", "/usr/local/bin/codex", home / ".codex/bin/codex",
+              home / ".npm-global/bin/codex", home / ".local/bin/codex"]:
+        cands.append(("installed codex", str(p)))
+    cands += [("installed codex", p) for p in glob.glob(str(home / ".nvm/versions/node/*/bin/codex"))]
+    out, seen = [], set()
+    for origin, p in cands:
+        if not p or p in seen or not Path(p).is_file():
+            continue
+        seen.add(p)
+        try:
+            v = subprocess.run([p, "--version"], capture_output=True, text=True, timeout=20).stdout
+            m = re.search(r"(\d+)\.(\d+)\.(\d+)", v or "")
+            s = subprocess.run([p, "login", "status"], capture_output=True, text=True, timeout=20)
+            txt = ((s.stdout or "") + (s.stderr or "")).strip().splitlines()
+            out.append((origin, p, m.group(0) if m else "?", txt[0] if txt else "?"))
+        except Exception:
+            out.append((origin, p, "?", "?"))
     return out
 
 
@@ -624,6 +653,12 @@ with m3:
             st.caption(" · ".join(f"{o}: {v}" for o, _p, v in ccs))
     else:
         st.caption("No Claude Code found (Max mode needs `pip install claude-agent-sdk`).")
+    cxs = codex_cli_versions()
+    if cxs:
+        st.caption(" · ".join(f"Codex CLI {v} ({o}) - {lt}" for o, _p, v, lt in cxs))
+    else:
+        st.caption("No Codex CLI found (ChatGPT-subscription backend: `npm install -g @openai/codex`, "
+                   "then CodexLogin.command).")
     pv = package_versions()
     st.caption(" · ".join(f"{k} {v}" for k, v in pv.items()))
     st.caption(f"answers/ {dir_size_mb(ANSWERS_DIR):,.0f} MB")

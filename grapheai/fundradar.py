@@ -80,7 +80,7 @@ def _track_usage(n_in, n_out, model=None):
     p_in, p_out = PRICES.get(model, (0.0, 0.0))
     delta = n_in / 1e6 * p_in + n_out / 1e6 * p_out
     u["cost"] = u.get("cost", 0.0) + delta
-    if st.session_state.get("backend") != "max":
+    if st.session_state.get("backend") not in ("max", "codex"):
         _add_spend(delta)
 
 
@@ -179,7 +179,7 @@ def call_claude_max(system, user_msg, model, max_tokens=None):
 
     Needs one-time setup (see MAX_SETUP.txt): `pip install claude-agent-sdk`
     (it bundles Claude Code) and a Claude Code login with the Max account.
-    Personal use of your own subscription only. max_tokens is not enforced on
+    ChatGPT subscription: through OpenAI's Codex CLI signed in with your ChatGPT Plus/Pro account. Personal use of your own subscriptions only. max_tokens is not enforced on
     this path (the CLI manages output length itself). New models need a
     recent Claude Code: the app runs the newest copy it can find.
     """
@@ -345,6 +345,322 @@ def _api_create(client, kw):
                 continue
             raise
     raise last
+
+
+# ---------------------------------------------------------- ChatGPT subscription backend (Codex CLI)
+# Fourth backend: the models of a ChatGPT Plus/Pro plan (GPT-5.6 family,
+# GPT-6-Astra, ...) through OpenAI's official Codex CLI signed in with the
+# ChatGPT account - the same idea as Claude Max through Claude Code. No API
+# key; usage counts against the plan's Codex limits. Every call is one
+# non-interactive `codex exec` in an empty scratch folder with the
+# read-only sandbox, asked for a plain answer, so nothing on disk is
+# touched. The reasoning-effort slider maps 1:1 (low ... max), clamped to
+# the levels the chosen model supports. Model ids come from the CLI's own
+# catalogue (`codex debug models`), never from the app.
+CODEX_EFFORT_ORDER = ("low", "medium", "high", "xhigh", "max")
+CODEX_TIMEOUT = 3600            # seconds per call (long manuscripts at effort max)
+CODEX_INSTALL_HINT = ("install it in Terminal with `npm install -g @openai/codex` "
+                      "(needs Node) or `brew install --cask codex`, then run "
+                      "`codex login` and sign in with your ChatGPT account - "
+                      "CodexLogin.command does both")
+CODEX_PREAMBLE = (
+    "You are the writing and analysis model behind GrapheAI, a personal research "
+    "platform. This is a single non-interactive request: answer it directly in your "
+    "final message. Do not run commands, do not read, create or edit files, do not "
+    "browse the web, do not ask questions and do not mention tools - there is no "
+    "repository to inspect; everything you need is below. Follow the INSTRUCTIONS "
+    "exactly (format, length, markers, JSON) and put the complete answer text in "
+    "your final message.")
+
+
+def _codex_candidates():
+    """(origin, path) for Codex CLI binaries: the path typed in the sidebar,
+    PATH, Homebrew, the standalone installer, npm globals, nvm."""
+    import glob
+    import shutil
+    home = Path.home()
+    cands = []
+    override = (st.session_state.get("codex_path") or "").strip()
+    if override:
+        cands.append(("chosen path", override))
+    w = shutil.which("codex")
+    if w:
+        cands.append(("on PATH", w))
+    for p in ["/opt/homebrew/bin/codex", "/usr/local/bin/codex", home / ".codex/bin/codex",
+              home / ".npm-global/bin/codex", home / ".local/bin/codex"]:
+        cands.append(("installed codex", str(p)))
+    for p in (glob.glob(str(home / ".nvm/versions/node/*/bin/codex"))
+              + glob.glob("/opt/node*/bin/codex")):
+        cands.append(("installed codex", p))
+    seen, out = set(), []
+    for origin, p in cands:
+        if p and p not in seen and Path(p).is_file():
+            seen.add(p)
+            out.append((origin, p))
+    return out
+
+
+def _codex_env(path):
+    """Environment for the CLI: PATH with the usual macOS tool folders so the
+    npm launcher finds `node` even when the app was started by double-click."""
+    import glob
+    import os
+    env = dict(os.environ)
+    home = str(Path.home())
+    extra = [str(Path(path).parent), "/opt/homebrew/bin", "/usr/local/bin",
+             f"{home}/.npm-global/bin", f"{home}/.codex/bin"]
+    extra += glob.glob(f"{home}/.nvm/versions/node/*/bin")
+    env["PATH"] = ":".join(extra + [env.get("PATH", "")])
+    env.setdefault("NO_COLOR", "1")
+    return env
+
+
+def _codex_run(path, args, stdin_text=None, timeout=120, cwd=None):
+    import subprocess
+    return subprocess.run([path] + list(args), input=stdin_text, capture_output=True,
+                          text=True, timeout=timeout, env=_codex_env(path), cwd=cwd)
+
+
+def codex_status(refresh=False):
+    """The newest Codex CLI found ({path, version, origin, login, login_text}),
+    cached for the session. `login` is True when `codex login status`
+    reports a signed-in account."""
+    import re as _re
+    key = "_codex_status"
+    if not refresh and key in st.session_state:
+        return st.session_state[key]
+    best = {}
+    for origin, p in _codex_candidates():
+        try:
+            r = _codex_run(p, ["--version"], timeout=30)
+        except Exception:
+            continue
+        m = _re.search(r"(\d+)\.(\d+)\.(\d+)", (r.stdout or "") + (r.stderr or ""))
+        if not m:
+            continue
+        v = m.group(0)
+        if not best or _ver_tuple(v) > _ver_tuple(best["version"]):
+            best = {"path": p, "version": v, "origin": origin}
+    if best:
+        try:
+            r = _codex_run(best["path"], ["login", "status"], timeout=30)
+            txt = ((r.stdout or "") + (r.stderr or "")).strip()
+            best["login"] = r.returncode == 0 and "not logged in" not in txt.lower()
+            best["login_text"] = (txt.splitlines()[0].strip() if txt else
+                                  ("Logged in" if best["login"] else "Not logged in"))
+        except Exception as e:
+            best["login"] = False
+            best["login_text"] = f"login status failed: {str(e)[:80]}"
+    st.session_state[key] = best
+    return best
+
+
+def codex_models(path, refresh=False):
+    """Model catalogue of this Codex CLI as [{'slug', 'name', 'levels',
+    'default', 'hidden', 'images', 'desc'}] in the CLI's own order."""
+    key = "_codex_models"
+    cache = st.session_state.get(key) or {}
+    if not refresh and cache.get("path") == path:
+        return cache["models"]
+    models = []
+    try:
+        r = _codex_run(path, ["debug", "models"], timeout=60)
+        raw = r.stdout or ""
+        i = raw.find("{")
+        d = json.loads(raw[i:]) if i >= 0 else {}
+        for m in d.get("models", []) or []:
+            slug = str(m.get("slug") or "").strip()
+            if not slug:
+                continue
+            levels = [str(lv.get("effort")) for lv in (m.get("supported_reasoning_levels") or [])
+                      if isinstance(lv, dict) and lv.get("effort")]
+            mods = m.get("input_modalities") or []
+            models.append({"slug": slug, "name": str(m.get("display_name") or slug),
+                           "levels": levels, "default": str(m.get("default_reasoning_level") or ""),
+                           "hidden": m.get("visibility") == "hide",
+                           "images": (not mods) or any("image" in str(x).lower() for x in mods),
+                           "desc": str(m.get("description") or "")})
+    except Exception:
+        models = []
+    st.session_state[key] = {"path": path, "models": models}
+    return models
+
+
+def _codex_effort(model_info=None):
+    """Slider effort clamped to what the model supports (never above)."""
+    eff = st.session_state.get("effort", "high")
+    if eff not in CODEX_EFFORT_ORDER:
+        eff = "high"
+    levels = [lv for lv in (model_info or {}).get("levels", []) if lv in CODEX_EFFORT_ORDER]
+    if levels and eff not in levels:
+        idx = CODEX_EFFORT_ORDER.index(eff)
+        lower = [lv for lv in levels if CODEX_EFFORT_ORDER.index(lv) <= idx]
+        eff = max(lower or levels, key=CODEX_EFFORT_ORDER.index)
+    return eff
+
+
+def _codex_parse_events(stdout):
+    """(last agent message, usage, error) from `codex exec --json` lines:
+    item.completed/agent_message carries text, turn.completed the usage."""
+    text, usage, err = "", {}, ""
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            ev = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        t = str(ev.get("type") or "")
+        item = ev.get("item")
+        if (t.startswith("item.") and isinstance(item, dict)
+                and item.get("type") == "agent_message" and item.get("text")):
+            text = str(item["text"])
+        if t == "turn.completed" and isinstance(ev.get("usage"), dict):
+            u = ev["usage"]
+            usage = {"input_tokens": int(u.get("input_tokens") or 0),
+                     "output_tokens": int(u.get("output_tokens") or 0),
+                     "cached_input_tokens": int(u.get("cached_input_tokens") or 0)}
+        if t in ("turn.failed", "error") or ev.get("error"):
+            e = ev.get("error") or ev.get("message") or ev
+            err = str(e.get("message") or e) if isinstance(e, dict) else str(e)
+    return text.strip(), usage, err
+
+
+def _codex_error_message(err, stderr, returncode):
+    import re as _re
+    tail = _re.sub(r"\x1b\[[0-9;]*m", "", stderr or "").strip()
+    tail = "\n".join(ln for ln in tail.splitlines()
+                     if ln.strip() and "bubblewrap" not in ln and "Reading additional input" not in ln)[-700:]
+    low = (err + " " + tail).lower()
+    hint = ""
+    if any(k in low for k in ("not logged in", "unauthorized", "401", "login", "auth")):
+        hint = " Sign in again: `codex login` in Terminal (or CodexLogin.command), then Re-check."
+    elif any(k in low for k in ("usage limit", "rate limit", "429", "quota", "too many")):
+        hint = " Your ChatGPT plan's Codex window seems used up - wait, or switch backend."
+    elif "model" in low and any(k in low for k in ("not found", "unsupported", "not available",
+                                                    "unknown", "does not")):
+        hint = " That model id is not available to this account - pick another in the sidebar."
+    msg = err or tail or f"codex exec exited with code {returncode}"
+    return f"Codex error: {msg[:900]}{hint}"
+
+
+def call_codex(system, user_msg, max_tokens=None, images=None):
+    """One text call through `codex exec` (ChatGPT subscription). max_tokens
+    is accepted for signature parity; the CLI has no output cap."""
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+    info = codex_status()
+    if not info:
+        raise RuntimeError(f"Codex CLI not found - {CODEX_INSTALL_HINT}.")
+    if not info.get("login"):
+        raise RuntimeError("Codex CLI is not signed in - run `codex login` in Terminal (or "
+                           "double-click CodexLogin.command), sign in with your ChatGPT "
+                           "account, then click Re-check in the sidebar.")
+    model = (st.session_state.get("codex_model") or "").strip()
+    if not model:
+        raise RuntimeError("Choose a ChatGPT model in the sidebar.")
+    minfo = next((m for m in codex_models(info["path"]) if m["slug"] == model), {})
+    if images and minfo and not minfo.get("images", True):
+        raise RuntimeError(f"{model} does not accept images (figure review needs a vision model).")
+    effort = _codex_effort(minfo)
+    prompt = (f"{CODEX_PREAMBLE}\n\n=== INSTRUCTIONS ===\n{system}\n\n"
+              f"=== REQUEST ===\n{user_msg}\n")
+    work = Path(tempfile.mkdtemp(prefix="grapheai_codex_"))
+    out = work / "last_message.txt"
+    args = ["exec", "--skip-git-repo-check", "--ephemeral", "-s", "read-only",
+            "--color", "never", "--json", "-o", str(out), "-m", model, "-C", str(work),
+            "-c", f'model_reasoning_effort="{effort}"', "-c", 'model_verbosity="high"']
+    for img in (images or []):
+        args += ["-i", str(img)]
+    extra = os.environ.get("GRAPHEAI_CODEX_EXTRA_ARGS")     # testing / advanced overrides
+    if extra:
+        args += list(json.loads(extra))
+    args.append("-")
+    try:
+        try:
+            r = _codex_run(info["path"], args, stdin_text=prompt, timeout=CODEX_TIMEOUT,
+                           cwd=str(work))
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"Codex did not answer within {CODEX_TIMEOUT // 60} min "
+                               "- lower the reasoning effort or split the task.")
+        text, usage, err = _codex_parse_events(r.stdout)
+        if out.exists():
+            t2 = out.read_text(encoding="utf-8", errors="replace").strip()
+            if t2:
+                text = t2
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    if usage:
+        _track_usage(usage.get("input_tokens", 0), usage.get("output_tokens", 0), model)
+    if r.returncode != 0 or (err and not text):
+        raise RuntimeError(_codex_error_message(err, r.stderr, r.returncode))
+    if not text:
+        raise RuntimeError(_codex_error_message("Codex returned no answer text", r.stderr,
+                                                r.returncode))
+    return text
+
+
+def call_codex_vision(system, text, png_path, max_tokens=3000):
+    """Image + text call (figure critic): the PNG rides along with -i."""
+    return call_codex(system, text, max_tokens, images=[png_path])
+
+
+def render_codex_sidebar():
+    """Sidebar for the ChatGPT-subscription backend; returns the api_key
+    sentinel ('' until the CLI is signed in and a model is chosen)."""
+    with st.expander("Codex CLI location (optional)", expanded=False):
+        p = st.text_input("Path to `codex`", value=st.session_state.get("codex_path", ""),
+                          key="codex_path_in",
+                          help="Leave empty to search PATH, Homebrew, ~/.codex/bin, npm and nvm.")
+        if p.strip() != (st.session_state.get("codex_path") or ""):
+            st.session_state["codex_path"] = p.strip()
+            codex_status(refresh=True)
+    c1, c2 = st.columns([3, 1])
+    if c2.button("Re-check", key="codex_recheck", help="After installing or `codex login`."):
+        info = codex_status(refresh=True)
+        if info:
+            codex_models(info["path"], refresh=True)
+    info = codex_status()
+    if not info:
+        c1.warning(f"Codex CLI not found - {CODEX_INSTALL_HINT}.")
+        st.session_state["codex_model"] = ""
+        return ""
+    if not info.get("login"):
+        c1.warning(f"Codex CLI {info['version']} found but not signed in "
+                   f"({info.get('login_text', '')}). Run `codex login` in Terminal (or "
+                   "double-click CodexLogin.command), choose 'Sign in with ChatGPT', then "
+                   "click Re-check.")
+    else:
+        c1.caption(f"Codex CLI {info['version']} ({info['origin']}) · {info.get('login_text', '')}")
+    models = codex_models(info["path"])
+    listed = [m for m in models if not m["hidden"]] or models
+    labels = [f"{m['name']}  ({m['slug']})" for m in listed] + ["Type a model id..."]
+    pick = st.selectbox("ChatGPT model", labels, index=0, key="codex_model_pick",
+                        help="From this Codex CLI's own catalogue (`codex debug models`). "
+                             "The Claude selector below is ignored in this mode.")
+    if pick == labels[-1] or not listed:
+        slug = st.text_input("Model id", value=st.session_state.get("codex_model_typed", ""),
+                             key="codex_model_typed_in",
+                             help="Exact id as OpenAI names it for Codex.").strip()
+        st.session_state["codex_model_typed"] = slug
+    else:
+        slug = listed[labels.index(pick)]["slug"]
+    st.session_state["codex_model"] = slug
+    minfo = next((m for m in models if m["slug"] == slug), {})
+    if minfo.get("levels"):
+        st.caption(f"Reasoning effort sent: {_codex_effort(minfo)} (slider "
+                   f"{st.session_state.get('effort', 'high')}; this model supports "
+                   f"{', '.join(minfo['levels'])})")
+    st.caption("Runs through OpenAI's Codex CLI signed in with your ChatGPT account, so "
+               "usage counts against your plan's Codex limits - no per-token cost. Personal "
+               "use of your own subscription only. Each call is one `codex exec` in an "
+               "empty read-only scratch folder; the figure critic attaches the image.")
+    return "codex-backend" if (info.get("login") and slug) else ""
 
 
 # ---------------------------------------------------------- OpenAI backend
@@ -547,6 +863,8 @@ def call_claude(api_key, system, user_msg, model, max_tokens=None):
     Backend 'api': the Anthropic API (Fable 5.1 with effort-controlled
     reasoning, streaming, refusal fallbacks). Backend 'max': the Claude
     Agent SDK, billed to the Claude Max plan."""
+    if st.session_state.get("backend") == "codex":
+        return call_codex(system, user_msg, max_tokens)
     if st.session_state.get("backend") == "openai":
         return call_openai(system, user_msg, max_tokens)
     if st.session_state.get("backend") == "max":
@@ -845,11 +1163,15 @@ with st.sidebar:
     backend_label = st.radio(
         "Claude access", ["API key (pay per use)",
                           "Claude Max subscription (needs Claude Code)",
-                          "OpenAI API (ChatGPT models, pay per use)"])
+                          "OpenAI API (ChatGPT models, pay per use)",
+                          "ChatGPT subscription (Plus/Pro via Codex CLI)"])
     st.session_state["backend"] = ("max" if "Max" in backend_label
+                                    else "codex" if "Codex" in backend_label
                                     else "openai" if "OpenAI" in backend_label
                                     else "api")
-    if st.session_state["backend"] == "openai":
+    if st.session_state["backend"] == "codex":
+        api_key = render_codex_sidebar()
+    elif st.session_state["backend"] == "openai":
         api_key = render_openai_sidebar()
     elif st.session_state["backend"] == "api":
         api_key = st.text_input("Anthropic API key", type="password")

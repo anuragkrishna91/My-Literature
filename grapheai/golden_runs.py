@@ -7,7 +7,8 @@ Loads the functions straight out of workbench.py, feeds them fixed inputs
 and checks fixed expectations: sandbox gate, canvas/data audits, figure
 stage with checkpoint and placeholder, reporting checklist, proposal
 consistency checks, work-plan figures, follow-up edits, revision apply and
-diff, library grounding, tracked-changes export. Exit code 1 on failure."""
+diff, library grounding, tracked-changes export, ChatGPT-backend event
+parsing. Exit code 1 on failure."""
 import ast, io, json, hashlib, re, sys, time, types, datetime, tempfile
 from pathlib import Path
 
@@ -74,7 +75,8 @@ def build_namespace():
             "_rv_year_of", "rv_hits_for_numbers", "_tc_plain", "_tc_run", "_tc_mark_paragraph",
             "tracked_changes_docx", "tracked_changes_bytes", "extract_uploaded_table",
             "table_to_text", "_md_runs", "md_to_docx", "_png_width_in", "sub_limits_check",
-            "_FuBox", "RX_DIR", "PROP_FIG_DIR"}
+            "_FuBox", "RX_DIR", "PROP_FIG_DIR", "_codex_parse_events", "_codex_effort",
+            "_codex_error_message", "CODEX_EFFORT_ORDER"}
     for n in tree.body:
         if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in want:
             exec(ast.get_source_segment(src, n), G)
@@ -221,6 +223,23 @@ def main():
         xml = d.element.xml
         assert "<w:ins " in xml and "<w:del " in xml and "<w:delText" in xml
     check("Word Track Changes export", t_tracked)
+
+    def t_codex():
+        P = G["_codex_parse_events"]
+        t, u, e = P('{"type":"thread.started","thread_id":"x"}\n{"type":"turn.started"}\n'
+                    '{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"working"}}\n'
+                    '{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"FINAL"}}\n'
+                    '{"type":"turn.completed","usage":{"input_tokens":123,"cached_input_tokens":23,'
+                    '"output_tokens":45,"reasoning_output_tokens":5}}\n')
+        assert (t, u["input_tokens"], u["output_tokens"], e) == ("FINAL", 123, 45, "")
+        t, u, e = P('{"type":"turn.failed","error":{"message":"usage limit reached"}}')
+        assert e == "usage limit reached" and not t
+        assert "Codex window" in G["_codex_error_message"](e, "", 1)
+        levels = {"levels": ["low", "medium", "high", "xhigh"]}
+        G["st"].session_state["effort"] = "max"
+        assert G["_codex_effort"](levels) == "xhigh" and G["_codex_effort"]({}) == "max"
+        G["st"].session_state["effort"] = "xhigh"
+    check("ChatGPT backend: event parsing + effort clamp", t_codex)
 
     width = max(len(r[0]) for r in RESULTS)
     fails = 0

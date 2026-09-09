@@ -288,6 +288,24 @@ prices per million tokens; the model id shown in the Claude selector is
 ignored in this mode. Model names change often - the list from your
 account is the authority, not the app.
 
+**ChatGPT subscription backend** (fourth option in every sidebar): your
+ChatGPT Plus/Pro plan without an API key, through OpenAI's official Codex
+CLI - the same idea as Claude Max through Claude Code. One-time setup:
+double-click `CodexLogin.command` (installs the CLI with Homebrew or npm
+if missing, then runs `codex login` → "Sign in with ChatGPT" in the
+browser). In the app choose the backend, click **Re-check**, and pick the
+model from the CLI's own catalogue - today GPT-6-Astra (`gpt-6-astra`), the
+GPT-5.6 family (`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`), GPT-5.5,
+GPT-5.2; the list comes from `codex debug models`, so new models appear
+when the CLI updates (`npm install -g @openai/codex` or `brew upgrade`).
+Each call is one `codex exec` in an empty read-only scratch folder with the
+reasoning effort from the slider (low…max, clamped to what the model
+supports; verbosity high); the figure critic attaches the PNG. Usage
+counts against the plan's Codex limits - the app shows tokens but no
+dollars. Personal use of your own subscription only. If a call fails with
+"not signed in", run `codex login` again; with "usage limit", wait for
+the window or switch backend.
+
 **Keeping Max mode current.** The Python package `claude-agent-sdk` ships
 its own copy of Claude Code and uses it by default, so a new model can be
 refused ("Claude Code 2.1.233 does not support this model; version 2.1.251
@@ -321,6 +339,8 @@ Filename pattern `1001_topic_2025_Title.pdf` enables Topic/Year filters.
 | "Not logged in" in Max mode | `claude` → `/login` → subscription → `/exit` |
 | "Claude Code x.y.z does not support this model" | `/opt/miniconda3/bin/pip install -U claude-agent-sdk`, restart the app (the SDK bundles its own Claude Code) |
 | Max usage-limit message | Sidebar → API key, or wait for the window |
+| ChatGPT backend: "Codex CLI not found" / "not signed in" | double-click `CodexLogin.command`, then **Re-check** in the sidebar |
+| ChatGPT backend: model missing from the list | update the CLI (`npm install -g @openai/codex` or `brew upgrade codex`), Re-check; or type the exact id |
 | Import button greyed out (PeroDeg/Analytics) | A required name/mapping field is empty |
 | Patent check fails | Patentscope RSS hiccup — tell Claude, provider can switch |
 | Port already in use | An old Terminal window still runs that app |
@@ -334,4 +354,4 @@ Filename pattern `1001_topic_2025_Title.pdf` enables Topic/Year filters.
 `impact.py` `venture.py` — the apps ·
 `radar_refresh.py` `analytics_refresh.py` `backup.py` — the jobs · `ingest.py`
 `get_papers.py` `workbench_downloader.py` + `literature/` — the corpus
-pipeline · `ask_rules.py` `config.py` `zotero_link.py` — support
+pipeline · `ask_rules.py` `config.py` `zotero_link.py` — support · `CodexLogin.command` — ChatGPT sign-in for the Codex CLI backend
