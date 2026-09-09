@@ -17,6 +17,7 @@ import datetime
 import re
 from pathlib import Path
 
+import sys
 import streamlit as st
 
 ANSWERS_DIR = Path("answers")
@@ -369,11 +370,208 @@ def _api_create(client, kw):
     raise last
 
 
+# ---------------------------------------------------------- OpenAI backend
+# Third backend next to the Anthropic API and Claude Max: any model in the
+# user's OpenAI account (listed live from the account, or typed by exact
+# id). Uses the official `openai` SDK: Responses API first, Chat
+# Completions as fallback. The sidebar's reasoning-effort slider maps to
+# the OpenAI reasoning effort (xhigh / max -> high). Every call is tracked
+# like the others; cost is counted only if you enter the model's prices.
+OPENAI_EFFORT = {"low": "low", "medium": "medium", "high": "high",
+                 "xhigh": "high", "max": "high"}
+
+
+def _openai_effort():
+    return OPENAI_EFFORT.get(st.session_state.get("effort", "high"), "high")
+
+
+def _openai_client():
+    try:
+        from openai import OpenAI
+    except ImportError as exc:
+        raise RuntimeError("OpenAI mode needs the SDK - in Terminal: "
+                           f"{sys.executable} -m pip install -U openai") from exc
+    key = (st.session_state.get("openai_key") or "").strip()
+    if not key:
+        raise RuntimeError("Enter the OpenAI API key in the sidebar.")
+    return OpenAI(api_key=key, timeout=900, max_retries=2)
+
+
+def openai_models(key):
+    """Model ids available to this account (cached per session)."""
+    cache = st.session_state.setdefault("_openai_models", {})
+    k = key[-8:]
+    if k in cache:
+        return cache[k]
+    from openai import OpenAI
+    client = OpenAI(api_key=key, timeout=30)
+    ids = sorted(m.id for m in client.models.list())
+    cache[k] = ids
+    return ids
+
+
+def _openai_model():
+    m = (st.session_state.get("openai_model") or "").strip()
+    if not m:
+        raise RuntimeError("Choose an OpenAI model id in the sidebar.")
+    return m
+
+
+def _openai_usage(resp):
+    u = getattr(resp, "usage", None)
+    if u is None:
+        return 0, 0
+    n_in = getattr(u, "input_tokens", None)
+    if n_in is None:
+        n_in = getattr(u, "prompt_tokens", 0)
+    n_out = getattr(u, "output_tokens", None)
+    if n_out is None:
+        n_out = getattr(u, "completion_tokens", 0)
+    return int(n_in or 0), int(n_out or 0)
+
+
+def _openai_unsupported(err):
+    m = str(err).lower()
+    return any(k in m for k in ("unsupported", "not supported", "unknown parameter",
+                                "unrecognized", "invalid_request", "does not support",
+                                "unexpected keyword", "not a valid"))
+
+
+def call_openai(system, user_msg, max_tokens=None):
+    """One text call. Responses API (with reasoning effort when enabled),
+    then the same without reasoning, then Chat Completions."""
+    client = _openai_client()
+    model = _openai_model()
+    _default_mt = getattr(globals().get("config"), "MAX_ANSWER_TOKENS", 4000) or 4000
+    mt = int(max_tokens or _default_mt)
+    if st.session_state.get("openai_reasoning", True):
+        mt = max(mt, 16000)          # reasoning tokens share the budget
+    attempts = []
+    if st.session_state.get("openai_reasoning", True):
+        attempts.append(("responses+reasoning",
+                         dict(model=model, instructions=system, input=user_msg,
+                              max_output_tokens=mt, reasoning={"effort": _openai_effort()})))
+    attempts.append(("responses", dict(model=model, instructions=system, input=user_msg,
+                                       max_output_tokens=mt)))
+    last = None
+    for name, kw in attempts:
+        try:
+            resp = client.responses.create(**kw)
+            text = (getattr(resp, "output_text", "") or "").strip()
+            n_in, n_out = _openai_usage(resp)
+            _track_usage(n_in, n_out, model)
+            if not text:
+                raise RuntimeError("OpenAI returned no text (check max tokens / refusal)")
+            return text
+        except Exception as e:
+            last = e
+            if not _openai_unsupported(e) and "reasoning" not in name:
+                break
+    try:
+        kw = dict(model=model, messages=[{"role": "system", "content": system},
+                                         {"role": "user", "content": user_msg}],
+                  max_completion_tokens=mt)
+        if st.session_state.get("openai_reasoning", True):
+            kw["reasoning_effort"] = _openai_effort()
+        try:
+            resp = client.chat.completions.create(**kw)
+        except Exception as e:
+            if "reasoning_effort" in kw and _openai_unsupported(e):
+                kw.pop("reasoning_effort")
+                resp = client.chat.completions.create(**kw)
+            else:
+                raise
+        text = (resp.choices[0].message.content or "").strip()
+        n_in, n_out = _openai_usage(resp)
+        _track_usage(n_in, n_out, model)
+        if not text:
+            raise RuntimeError("OpenAI returned no text")
+        return text
+    except Exception as e2:
+        raise RuntimeError(f"OpenAI error: {last or e2}") from e2
+
+
+def call_openai_vision(system, text, png_path, max_tokens=3000):
+    """Image + text call (figure critic) on the OpenAI backend."""
+    import base64
+    client = _openai_client()
+    model = _openai_model()
+    data_url = ("data:image/png;base64,"
+                + base64.standard_b64encode(Path(png_path).read_bytes()).decode("ascii"))
+    try:
+        resp = client.responses.create(
+            model=model, instructions=system,
+            input=[{"role": "user", "content": [
+                {"type": "input_text", "text": text},
+                {"type": "input_image", "image_url": data_url}]}],
+            max_output_tokens=int(max_tokens))
+        out = (getattr(resp, "output_text", "") or "").strip()
+    except Exception:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "system", "content": system},
+                      {"role": "user", "content": [
+                          {"type": "text", "text": text},
+                          {"type": "image_url", "image_url": {"url": data_url}}]}],
+            max_completion_tokens=int(max_tokens))
+        out = (resp.choices[0].message.content or "").strip()
+    n_in, n_out = _openai_usage(resp)
+    _track_usage(n_in, n_out, model)
+    if not out:
+        raise RuntimeError("OpenAI returned no text for the figure review")
+    return out
+
+
+def render_openai_sidebar():
+    """Sidebar controls for the OpenAI backend; returns the api_key
+    sentinel ('' until a key is entered so buttons stay disabled)."""
+    key = st.text_input("OpenAI API key", type="password", key="openai_key_in",
+                        help="From platform.openai.com. Sent only to api.openai.com.")
+    st.session_state["openai_key"] = key
+    models = []
+    if key.strip():
+        try:
+            models = openai_models(key.strip())
+        except Exception as e:
+            st.caption(f"Could not list the account's models: {str(e)[:90]}")
+    typed = st.text_input("Model id", value=st.session_state.get("openai_model", ""),
+                          key="openai_model_in",
+                          help="Exact id as OpenAI names it. Pick from the list below "
+                               "once the key is entered, or type it.")
+    if models:
+        pick = st.selectbox("...or pick from your account", ["(keep typed id)"] + models,
+                            key="openai_model_pick")
+        if pick != "(keep typed id)":
+            typed = pick
+    st.session_state["openai_model"] = typed.strip()
+    st.session_state["openai_reasoning"] = st.checkbox(
+        "Reasoning model (send effort; larger output budget)", value=True,
+        key="openai_reason",
+        help="Untick for non-reasoning models if the API rejects the reasoning "
+             "parameter (the app also retries without it).")
+    c1, c2 = st.columns(2)
+    p_in = c1.number_input("$ / M input tokens", min_value=0.0, step=0.25,
+                           value=float(st.session_state.get("openai_p_in", 0.0)),
+                           key="openai_p_in_w")
+    p_out = c2.number_input("$ / M output tokens", min_value=0.0, step=0.5,
+                            value=float(st.session_state.get("openai_p_out", 0.0)),
+                            key="openai_p_out_w")
+    st.session_state["openai_p_in"], st.session_state["openai_p_out"] = p_in, p_out
+    if typed.strip() and (p_in or p_out):
+        PRICES[typed.strip()] = (p_in, p_out)
+    st.caption("Requests (and the figure critic's images) go to api.openai.com. The "
+               "reasoning-effort slider maps to OpenAI's low / medium / high. "
+               "Cost is tracked only with the prices above.")
+    return "openai-backend" if (key.strip() and typed.strip()) else ""
+
+
 def call_claude(api_key, system, user_msg, model, max_tokens=None):
     """Single Claude call via the selected backend; tracks token usage.
     Backend 'api': the Anthropic API (Fable 5.1 with effort-controlled
     reasoning, streaming, refusal fallbacks). Backend 'max': the Claude
     Agent SDK, billed to the Claude Max plan."""
+    if st.session_state.get("backend") == "openai":
+        return call_openai(system, user_msg, max_tokens)
     if st.session_state.get("backend") == "max":
         return call_claude_max(system, user_msg, model, max_tokens)
     import anthropic
@@ -944,9 +1142,14 @@ with st.sidebar:
     st.caption("by GrapheAI · Dr. Anurag Krishna")
     backend_label = st.radio(
         "Claude access", ["API key (pay per use)",
-                          "Claude Max subscription (needs Claude Code)"])
-    st.session_state["backend"] = ("max" if "Max" in backend_label else "api")
-    if st.session_state["backend"] == "api":
+                          "Claude Max subscription (needs Claude Code)",
+                          "OpenAI API (ChatGPT models, pay per use)"])
+    st.session_state["backend"] = ("max" if "Max" in backend_label
+                                    else "openai" if "OpenAI" in backend_label
+                                    else "api")
+    if st.session_state["backend"] == "openai":
+        api_key = render_openai_sidebar()
+    elif st.session_state["backend"] == "api":
         api_key = st.text_input("Anthropic API key", type="password")
     else:
         # Sentinel so features unlock; never sent anywhere in Max mode.

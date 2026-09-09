@@ -231,7 +231,7 @@ def claude_code_versions():
 
 def package_versions():
     vers = {}
-    for name in ("anthropic", "claude_agent_sdk", "streamlit", "chromadb", "matplotlib", "openpyxl"):
+    for name in ("anthropic", "claude_agent_sdk", "openai", "streamlit", "chromadb", "matplotlib", "openpyxl"):
         try:
             mod = __import__(name)
             vers[name] = getattr(mod, "__version__", "installed")

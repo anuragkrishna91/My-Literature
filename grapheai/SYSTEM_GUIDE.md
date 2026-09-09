@@ -277,6 +277,17 @@ Progress · Interpret. Bayesian mode needs `pip install scikit-learn`.
 batch. Spend + budget shared across all apps (`answers/spend.json`).
 Fable 5.1 = deepest reasoning (use effort 'max' for the hardest judgments); drop to Sonnet 5 when the Max window runs low.
 
+**OpenAI backend** (third option in every sidebar): enter an OpenAI API
+key, then pick any model from the live list of your account or type its
+exact id. Calls use the official `openai` SDK (`/opt/miniconda3/bin/pip
+install -U openai`): Responses API with the reasoning effort from the
+slider (xhigh/max → high), falling back automatically if a model rejects
+the reasoning parameter or the Responses API. The figure critic sends
+images to OpenAI too. Cost is tracked only when you enter the model's
+prices per million tokens; the model id shown in the Claude selector is
+ignored in this mode. Model names change often - the list from your
+account is the authority, not the app.
+
 **Keeping Max mode current.** The Python package `claude-agent-sdk` ships
 its own copy of Claude Code and uses it by default, so a new model can be
 refused ("Claude Code 2.1.233 does not support this model; version 2.1.251
