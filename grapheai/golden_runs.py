@@ -76,7 +76,8 @@ def build_namespace():
             "tracked_changes_docx", "tracked_changes_bytes", "extract_uploaded_table",
             "table_to_text", "_md_runs", "md_to_docx", "_png_width_in", "sub_limits_check",
             "_FuBox", "RX_DIR", "PROP_FIG_DIR", "_codex_parse_events", "_codex_effort",
-            "_codex_error_message", "CODEX_EFFORT_ORDER", "rx_docs", "_rx_doc_for_change"}
+            "_codex_error_message", "CODEX_EFFORT_ORDER", "rx_docs", "_rx_doc_for_change",
+            "rc_deterministic", "_rc_figrefs", "RC_FIGREF_RE", "RC_DEFENSIVE", "RC_OBSEQUIOUS"}
     for n in tree.body:
         if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in want:
             exec(ast.get_source_segment(src, n), G)
@@ -246,6 +247,21 @@ def main():
         assert G["_codex_effort"](levels) == "xhigh" and G["_codex_effort"]({}) == "max"
         G["st"].session_state["effort"] = "xhigh"
     check("ChatGPT backend: event parsing + effort clamp", t_codex)
+
+    def t_revcheck():
+        orig = "Results\n\nStability was tested for 500 h.\n\nConclusions\n\nLiF passivates the interface."
+        rev = ("Results\n\nStability was tested for 1,120 h (Fig. S12) on 8 devices.\n\nConclusions\n\n"
+               "The data are consistent with passivation. The champion reached 25.6 %.")
+        letter = "We thank the reviewers. We extended the test to 1,120 h (Fig. S12, Table S9). Clearly the reviewer is wrong. EQE 91 %."
+        st_ = {"inputs": {"orig_text": orig, "rev_text": rev, "orig_paragraphs": G["rx_mark_sections"](orig)[0],
+                          "rev_paragraphs": G["rx_mark_sections"](rev)[0], "letter": letter,
+                          "reviews": "R1: longer stability test.", "si_text": "Figure S12\n\nMPP for 1,120 h on 8 devices.", "notes": ""},
+               "stages": {}}
+        d = G["rc_deterministic"](st_)
+        assert d["n_diffs"] == 2 and d["unsourced_numbers"] == ["25.6"], (d["n_diffs"], d["unsourced_numbers"])
+        assert "91" in d["letter_numbers_missing"] and d["refs_missing"] == ["S9"], (d["letter_numbers_missing"], d["refs_missing"])
+        assert "clearly" in d["defensive"] and "the reviewer is wrong" in d["defensive"] and d["thanks"] == 1
+    check("revision check: diff, numbers, references, tone", t_revcheck)
 
     width = max(len(r[0]) for r in RESULTS)
     fails = 0

@@ -54,7 +54,14 @@ supporting files, applied only when they match and add no unsourced
 number → before/after diffs → Word bundle; then **iterate**: edit any
 reply in place, "Redo this point" with an instruction, round notes with
 new facts, redo several points, rewrite the opening, versions with
-restore, Track Changes per document) · Claim checker · Extract
+restore, Track Changes per document) and **🔍 Check my revision** (you
+revised and wrote the letter yourself: manuscript as reviewed + revised
+manuscript + response letter + reviews → paragraph diff, letter mapped
+onto every point, each claimed change verified in the real diff,
+unrequested changes, unsourced numbers, dangling figure/table
+references, tone, simulated second-round reviewer reactions, predicted
+decision, ranked fixes, Word report, chat to fix the letter or the
+manuscript) · Claim checker · Extract
 · Figures (corpus figure search — and **🎨 Figure Studio**: sandbox-rendered
 schematics/workflows/roadmaps/data charts, 300-dpi PNG + SVG, visual QA)
 · Library (comparison matrix, journal scan) · Get Papers (OA +
@@ -129,8 +136,22 @@ feature lives).
   type in notes, instructions or the chat count as sources; anything else
   new stays an [AUTHOR: ...] item. "Reopen the last response" on the panel
   brings a finished job back for more rounds.
+- **Check my revision** (Review tab): the audit before you resubmit.
+  Verdict per point - addressed / partial / claim not in manuscript /
+  rebuttal with evidence / weak rebuttal / not addressed - comes from the
+  actual differences between the two manuscripts, never from what the
+  letter says. Deterministic checks need no model: numbers in the letter
+  absent from the revised manuscript, SI, notes or reviews; new numbers in
+  the revision with no source; figure/table references in the letter that
+  resolve nowhere; defensive or obsequious phrases; leftover [AUTHOR]
+  markers. Every changed paragraph is mapped to the point it answers;
+  changes that answer nobody are listed as unrequested (declare them to
+  the editor). The editor's verdict predicts the decision and each
+  reviewer's second-round reaction, then ranks the fixes. The chat below
+  applies exact edits to your response letter or revised manuscript and
+  offers the revised copies for download.
 - **Golden runs**: double-click `GoldenRuns.command` (or `python
-  golden_runs.py`) after every update or model change - ten deterministic
+  golden_runs.py`) after every update or model change - eleven deterministic
   checks of the Workbench machinery with no model call; exit code 1 on
   failure.
 

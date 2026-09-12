@@ -10789,6 +10789,478 @@ def render_watch_impact(found):
                           for i in hot], use_container_width=True, hide_index=True)
 
 
+# ==========================================================================
+# Check my revision - audit of an author-made revision + response letter
+# against the reviewer reports: point coverage, claimed changes verified
+# in the actual diff, unrequested changes, unsourced numbers, letter
+# consistency and tone, simulated second-round reviewer reaction.
+# ==========================================================================
+RC_DIR = ANSWERS_DIR / "revision_checks"
+
+RC_MAP_SYSTEM = """\
+You map an authors' response letter onto the numbered reviewer points. You receive the points (id, reviewer, text) and the full response letter. For each point find the passage of the letter that answers it (verbatim excerpt, up to 900 characters; empty if the letter never addresses it) and list the concrete claims the authors make about changes ("we added ...", "we now show ...", "Section 3.2 was rewritten", "new Fig. S12"), each with the location the authors name.
+OUTPUT: ONLY a JSON object {"responses": [{"id": "R1.1", "found": true, "excerpt": "...", "claims": [{"claim": "one sentence", "location": "as named by the authors, or empty"}], "stance": "accepted | partially accepted | rebutted | deferred | unclear"}]}"""
+
+RC_AUDIT_SYSTEM = """\
+You are a meticulous handling editor checking an authors' revision before it goes back to the reviewers. For each reviewer point you receive: the point, the authors' response excerpt and claims, and the ACTUAL CHANGES between the manuscript as reviewed and the revised manuscript (numbered diff blocks: before / after), plus the supporting files if given. Judge only from this material; never assume a change exists because the letter says so.
+
+For each point decide:
+- verdict: "addressed" (response adequate and every claimed change is visible in the diff or the revised text), "partial" (addressed in part, or a claimed change is weaker than claimed), "claim_not_found" (the letter claims a change that the diff and the revised manuscript do not contain), "rebuttal_ok" (the authors decline with evidence a fair reviewer would accept), "rebuttal_weak" (decline without adequate evidence or with a tone that will irritate), "not_addressed" (no response, or a response that ignores what was asked).
+- evidence: the diff block numbers and a short quote from the revised text that support the verdict (or "no matching change" for claim_not_found).
+- reviewer_satisfied: your honest probability (0-1) that this reviewer accepts the response as is.
+- issues: concrete problems (missing location pointer, number in the letter absent from the manuscript, over-claiming, defensive wording, requested item silently skipped ...).
+- fix: the single most useful concrete fix (what to add to the letter or the manuscript), or empty.
+OUTPUT: ONLY a JSON object {"audits": [{"id": "R1.1", "verdict": "...", "evidence": "...", "reviewer_satisfied": 0.7, "issues": ["..."], "fix": "..."}]}"""
+
+RC_DIFFMAP_SYSTEM = """\
+You receive numbered change blocks (before / after) between a manuscript as reviewed and its revision, and the list of reviewer points. For each block name the point ids it serves (empty list if the change answers no reviewer request: an unrequested change the authors must declare to the editor), whether it introduces a new claim, result or number ("new_content": true/false), and a 6-12 word description.
+OUTPUT: ONLY a JSON object {"blocks": [{"n": 1, "points": ["R1.1"], "new_content": false, "what": "..."}]}"""
+
+RC_SUMMARY_SYSTEM = """\
+You are the handling editor of {JOURNAL} writing an internal pre-check of a revised manuscript and its response letter before sending them back to the reviewers, and simulating each reviewer's second-round reaction. You receive the per-point audit table, the deterministic checks (unrequested changes, numbers in the letter absent from the manuscript, new numbers in the revision without a source, figure/table references that do not resolve, tone counts) and the letter's opening.
+Write, in markdown:
+## Editor's verdict
+Predicted outcome after this round (accept / minor revision / major revision / reject) with a one-paragraph justification citing point ids.
+## Reviewer 1 (and 2, 3 ...) - likely reaction
+For each reviewer: two to five sentences in the reviewer's voice on what satisfies them and what still does not, naming point ids.
+## Ranked fixes before submission
+Numbered list, most important first, each one concrete (what to write where), covering: claims not found in the manuscript, points not addressed, weak rebuttals, unrequested changes to declare, numbers to reconcile, tone. At most 12 items.
+## Letter tone
+Three sentences on the letter's tone with one quoted phrase to change if any.
+Base everything on the provided material; never invent a reviewer request or a change."""
+
+
+def rc_save_state(state):
+    try:
+        d = RC_DIR / state["sig"]
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "state.json").write_text(_rwjson.dumps(state, default=str), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def rc_load_last_state():
+    try:
+        cands = sorted(RC_DIR.glob("*/state.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if cands:
+            return _rwjson.loads(cands[0].read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return None
+
+
+RC_FIGREF_RE = re.compile(r"\b(?:Fig(?:ure)?s?\.?|Table|Supplementary (?:Fig(?:ure)?|Table|Note))\s?(S?\d+[a-z]?)",
+                          re.IGNORECASE)
+RC_DEFENSIVE = ("the reviewer is wrong", "the reviewer is mistaken", "fails to understand",
+                "misunderstands", "clearly", "obviously", "as any expert knows", "it is well known",
+                "we strongly disagree", "the reviewer did not read", "trivial", "unfounded",
+                "we do not see the point", "this criticism is not valid")
+RC_OBSEQUIOUS = ("we are extremely grateful", "invaluable", "insightful comments", "we deeply appreciate",
+                 "we sincerely thank", "excellent suggestion", "the reviewer is absolutely right",
+                 "we are very grateful", "we humbly")
+
+
+def _rc_figrefs(text):
+    out = set()
+    for m in RC_FIGREF_RE.finditer(text or ""):
+        out.add(m.group(1).upper())
+    return out
+
+
+def rc_deterministic(state):
+    """Diff, numbers and references that need no model."""
+    inp, stg = state["inputs"], state["stages"]
+    orig = list(inp["orig_paragraphs"])
+    rev = list(inp["rev_paragraphs"])
+    diffs = rx_diff_paragraphs(orig, rev)
+    src_pool = rx_numbers_strict(inp["orig_text"]) | rx_numbers_strict(inp.get("si_text", "")) \
+        | rx_numbers_strict(inp.get("notes", "")) | rx_numbers_strict(inp["letter"])
+    rev_new = rx_numbers_strict(inp["rev_text"]) - rx_numbers_strict(inp["orig_text"])
+    unsourced = sorted(n for n in rev_new if n not in src_pool)
+    letter_nums = rx_numbers_strict(inp["letter"])
+    ms_pool = rx_numbers_strict(inp["rev_text"]) | rx_numbers_strict(inp.get("si_text", "")) \
+        | rx_numbers_strict(inp.get("notes", "")) | rx_numbers_strict(inp["reviews"])
+    letter_missing = sorted(n for n in letter_nums if n not in ms_pool)
+    refs_letter = _rc_figrefs(inp["letter"])
+    refs_docs = _rc_figrefs(inp["rev_text"]) | _rc_figrefs(inp.get("si_text", ""))
+    refs_missing = sorted(r for r in refs_letter if r not in refs_docs)
+    low = inp["letter"].lower()
+    defensive = [k for k in RC_DEFENSIVE if k in low]
+    obsequious = [k for k in RC_OBSEQUIOUS if k in low]
+    author_marks = RW_AUTHOR_RE.findall(inp["letter"] + inp["rev_text"])
+    stg["det"] = {"diffs": diffs, "n_diffs": len(diffs),
+                  "words_orig": len(inp["orig_text"].split()), "words_rev": len(inp["rev_text"].split()),
+                  "words_letter": len(inp["letter"].split()),
+                  "unsourced_numbers": unsourced, "letter_numbers_missing": letter_missing,
+                  "refs_missing": refs_missing, "defensive": defensive, "obsequious": obsequious,
+                  "thanks": low.count("thank"), "author_markers": author_marks[:20]}
+    return stg["det"]
+
+
+def _rc_diff_text(diffs, cap_blocks=60, cap_chars=700):
+    parts = []
+    for i, d in enumerate(diffs[:cap_blocks], 1):
+        parts.append(f"[block {i}] BEFORE: {d['before'][:cap_chars]}\nAFTER: {d['after'][:cap_chars]}")
+    if len(diffs) > cap_blocks:
+        parts.append(f"[... {len(diffs) - cap_blocks} more changed paragraphs not shown]")
+    return "\n\n".join(parts) or "(no paragraph differs between the two manuscripts)"
+
+
+def rc_run(state, status_box):
+    """points -> letter map -> per-point audit -> change map -> editor
+    summary -> report."""
+    _RW_UI["box"] = status_box
+    inp, opts, stg = state["inputs"], state["opts"], state["stages"]
+
+    def step(msg):
+        status_box.write(msg)
+        rw_log(state, msg)
+
+    if "det" not in stg:
+        step("Comparing the two manuscripts and checking numbers and references...")
+        rc_deterministic(state)
+        rc_save_state(state)
+    if "points" not in stg:
+        step("Splitting the reviews into points...")
+        raw = rw_call(RX_POINTS_SYSTEM, f"DECISION LETTER AND REVIEWS:\n\n{inp['reviews'][:120000]}", 6000)
+        pts = [p for p in ((_rw_json_block(raw) or {}).get("points") or []) if isinstance(p, dict) and p.get("text")]
+        for i, p in enumerate(pts, 1):
+            p.setdefault("id", f"P.{i}")
+            p.setdefault("reviewer", 1)
+            p.setdefault("type", "clarification")
+            p.setdefault("severity", "minor")
+        if not pts:
+            raise RuntimeError("No reviewer points could be extracted - check the reviews text.")
+        stg["points"] = pts
+        rc_save_state(state)
+    pts = stg["points"]
+    pts_txt = "\n".join(f"[{p['id']}] reviewer {p['reviewer']} · {p['type']} · {p['severity']}: {p['text']}"
+                        for p in pts)
+    if "map" not in stg:
+        step("Mapping the response letter onto the points...")
+        raw = rw_call(RC_MAP_SYSTEM, f"POINTS:\n{pts_txt}\n\n=== RESPONSE LETTER ===\n{inp['letter'][:100000]}", 9000)
+        got = {str(r.get("id")): r for r in ((_rw_json_block(raw) or {}).get("responses") or [])
+               if isinstance(r, dict)}
+        stg["map"] = {p["id"]: got.get(p["id"]) or {"id": p["id"], "found": False, "excerpt": "",
+                                                    "claims": [], "stance": "unclear"} for p in pts}
+        rc_save_state(state)
+    diff_txt = _rc_diff_text(stg["det"]["diffs"])
+    stg.setdefault("audits", {})
+    todo = [p for p in pts if p["id"] not in stg["audits"]]
+    batch, n_b = 6, max(1, (len(todo) + 5) // 6)
+    for bi in range(0, len(todo), batch):
+        grp = todo[bi:bi + batch]
+        step(f"Auditing points {bi // batch + 1}/{n_b} ({', '.join(p['id'] for p in grp)})...")
+        blocks = []
+        for p in grp:
+            m = stg["map"][p["id"]]
+            blocks.append(f"[{p['id']}] reviewer {p['reviewer']} · {p['type']} · {p['severity']}\n"
+                          f"POINT: {p['text']}\nRESPONSE EXCERPT: {m.get('excerpt') or '(the letter does not address this point)'}\n"
+                          f"CLAIMS: {_rwjson.dumps(m.get('claims') or [])[:2000]}\nSTANCE: {m.get('stance', '')}")
+        umsg = ("POINTS AND RESPONSES:\n\n" + "\n\n".join(blocks)
+                + f"\n\n=== ACTUAL CHANGES (manuscript as reviewed -> revised) ===\n{diff_txt[:60000]}"
+                + f"\n\n=== REVISED MANUSCRIPT (excerpt) ===\n{inp['rev_text'][:50000]}"
+                + (f"\n\n=== SUPPORTING FILES ===\n{inp['si_text'][:30000]}" if inp.get("si_text") else "")
+                + (f"\n\n=== AUTHORS' NOTES ===\n{inp['notes'][:8000]}" if inp.get("notes") else "")
+                + "\n\nAudit these points now (JSON only).")
+        raw = rw_call(RC_AUDIT_SYSTEM, umsg, 9000)
+        got = {str(a.get("id")): a for a in ((_rw_json_block(raw) or {}).get("audits") or []) if isinstance(a, dict)}
+        for p in grp:
+            a = got.get(p["id"]) or {"id": p["id"], "verdict": "not_addressed", "evidence": "(no audit returned)",
+                                     "reviewer_satisfied": 0.0, "issues": ["the model returned no audit"], "fix": ""}
+            a.setdefault("issues", [])
+            try:
+                a["reviewer_satisfied"] = float(a.get("reviewer_satisfied") or 0.0)
+            except Exception:
+                a["reviewer_satisfied"] = 0.0
+            stg["audits"][p["id"]] = a
+        rc_save_state(state)
+    if "diffmap" not in stg:
+        step("Mapping every change to a reviewer request...")
+        diffs = stg["det"]["diffs"]
+        if diffs:
+            raw = rw_call(RC_DIFFMAP_SYSTEM, f"POINTS:\n{pts_txt}\n\n=== CHANGE BLOCKS ===\n{diff_txt[:80000]}", 8000)
+            blocks = {int(b.get("n")): b for b in ((_rw_json_block(raw) or {}).get("blocks") or [])
+                      if isinstance(b, dict) and str(b.get("n", "")).isdigit()}
+        else:
+            blocks = {}
+        stg["diffmap"] = [{"n": i, "points": list((blocks.get(i) or {}).get("points") or []),
+                           "new_content": bool((blocks.get(i) or {}).get("new_content")),
+                           "what": str((blocks.get(i) or {}).get("what") or "")}
+                          for i in range(1, min(len(diffs), 60) + 1)]
+        rc_save_state(state)
+    if "summary" not in stg:
+        step("Editor's verdict and reviewer reactions...")
+        det = stg["det"]
+        table = "\n".join(f"[{p['id']}] R{p['reviewer']} {p['severity']} · verdict {stg['audits'][p['id']]['verdict']} · "
+                          f"satisfied {stg['audits'][p['id']]['reviewer_satisfied']:.2f} · issues: "
+                          f"{'; '.join(str(x) for x in stg['audits'][p['id']].get('issues', []))[:300]} · fix: "
+                          f"{str(stg['audits'][p['id']].get('fix', ''))[:200]}" for p in pts)
+        unreq = [b for b in stg["diffmap"] if not b["points"]]
+        checks = (f"Unrequested changes ({len(unreq)}): " + "; ".join(f"block {b['n']}: {b['what']}" for b in unreq[:15])
+                  + f"\nNumbers in the letter absent from the revised manuscript/SI/notes: {', '.join(det['letter_numbers_missing'][:20]) or 'none'}"
+                  f"\nNew numbers in the revision without a source: {', '.join(det['unsourced_numbers'][:20]) or 'none'}"
+                  f"\nFigure/table references in the letter not found in the revised documents: {', '.join(det['refs_missing'][:20]) or 'none'}"
+                  f"\nDefensive phrases: {', '.join(det['defensive']) or 'none'} · obsequious phrases: {', '.join(det['obsequious']) or 'none'}"
+                  f"\nLetter: {det['words_letter']} words; manuscript {det['words_orig']} -> {det['words_rev']} words; "
+                  f"{det['n_diffs']} changed paragraphs; [AUTHOR] markers left: {len(det['author_markers'])}")
+        umsg = (f"PER-POINT AUDIT:\n{table[:40000]}\n\nDETERMINISTIC CHECKS:\n{checks}\n\n"
+                f"LETTER OPENING:\n{inp['letter'][:2500]}")
+        stg["summary"] = rw_call(RC_SUMMARY_SYSTEM.replace("{JOURNAL}", opts.get("journal") or "the journal"), umsg, 5000)
+        rc_save_state(state)
+    if "report" not in stg:
+        step("Assembling the report...")
+        rc_report(state)
+        try:
+            record_qa(f"[REVISION CHECK] {inp.get('rev_name', '')}", stg["report"], [], do_autosave)
+        except Exception as e:
+            rw_log(state, f"record_qa failed: {e}")
+        state["status"] = "complete"
+        rc_save_state(state)
+
+
+RC_VERDICT_LABEL = {"addressed": "✅ addressed", "partial": "🟡 partial", "claim_not_found": "❌ claim not in manuscript",
+                    "rebuttal_ok": "✅ rebuttal with evidence", "rebuttal_weak": "🟠 weak rebuttal",
+                    "not_addressed": "❌ not addressed"}
+
+
+def rc_report(state):
+    inp, stg = state["inputs"], state["stages"]
+    pts, det = stg["points"], stg["det"]
+    counts = {}
+    for p in pts:
+        v = stg["audits"][p["id"]]["verdict"]
+        counts[v] = counts.get(v, 0) + 1
+    unreq = [b for b in stg["diffmap"] if not b["points"]]
+    lines = [f"# Revision check - {inp.get('rev_name', '')}", "",
+             f"*{len(pts)} reviewer points · " + " · ".join(f"{RC_VERDICT_LABEL.get(k, k)}: {n}" for k, n in sorted(counts.items()))
+             + f" · {det['n_diffs']} changed paragraphs, {len(unreq)} unrequested · mean reviewer satisfaction "
+             f"{(sum(stg['audits'][p['id']]['reviewer_satisfied'] for p in pts) / max(1, len(pts))):.2f}*", "",
+             "> Verdicts come from the actual differences between the two manuscripts, not from what the letter claims.", "",
+             stg["summary"].strip(), "", "---", "", "## Point-by-point audit", ""]
+    for p in pts:
+        a, m = stg["audits"][p["id"]], stg["map"][p["id"]]
+        lines.append(f"**{p['id']}** (reviewer {p['reviewer']}, {p['type']}, {p['severity']}) - "
+                     f"{RC_VERDICT_LABEL.get(a['verdict'], a['verdict'])} · satisfied {a['reviewer_satisfied']:.0%}")
+        lines.append(f"*Reviewer:* {p['text'].strip()}")
+        lines.append(f"*Your response:* {(m.get('excerpt') or '(none found in the letter)').strip()[:700]}")
+        lines.append(f"*Evidence:* {str(a.get('evidence', '')).strip()}")
+        if a.get("issues"):
+            lines.append("*Issues:* " + "; ".join(str(x) for x in a["issues"]))
+        if a.get("fix"):
+            lines.append(f"*Fix:* {a['fix']}")
+        lines.append("")
+    lines += ["---", "", "## Changes in the manuscript and what they answer", ""]
+    for b in stg["diffmap"]:
+        d = det["diffs"][b["n"] - 1]
+        tag = ", ".join(b["points"]) if b["points"] else "UNREQUESTED - declare to the editor"
+        lines.append(f"**Change {b['n']}** [{tag}]{' · new content' if b['new_content'] else ''} - {b['what']}")
+        lines.append(d["marked"][:1500])
+        lines.append("")
+    if det["n_diffs"] > len(stg["diffmap"]):
+        lines.append(f"*{det['n_diffs'] - len(stg['diffmap'])} further changed paragraphs were not mapped (cap).*")
+    lines += ["---", "", "## Consistency checks", "",
+              f"- Numbers in the letter absent from the revised manuscript, SI, notes or reviews: "
+              f"{', '.join(det['letter_numbers_missing']) or 'none'}",
+              f"- New numbers in the revision with no source (original, SI, notes, letter): "
+              f"{', '.join(det['unsourced_numbers']) or 'none'}",
+              f"- Figure/table references in the letter not found in the revised documents: "
+              f"{', '.join(det['refs_missing']) or 'none'}",
+              f"- Defensive phrases: {', '.join(det['defensive']) or 'none'}",
+              f"- Obsequious phrases: {', '.join(det['obsequious']) or 'none'}",
+              f"- 'thank' appears {det['thanks']} time(s); letter {det['words_letter']} words; manuscript "
+              f"{det['words_orig']} → {det['words_rev']} words",
+              f"- [AUTHOR: ...] markers still present: {len(det['author_markers'])}"]
+    stg["report"] = "\n".join(lines)
+    try:
+        d = RC_DIR / state["sig"]
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "revision_check.md").write_text(stg["report"], encoding="utf-8")
+        doc = Document()
+        doc.add_heading("Revision check", level=1)
+        md_to_docx(doc, stg["report"])
+        doc.save(d / "revision_check.docx")
+        state["docx"] = str(d / "revision_check.docx")
+    except Exception as e:
+        rw_log(state, f"docx failed: {e}")
+
+
+def render_revision_check_panel():
+    st.markdown(
+        "**Check my revision.** You revised the manuscript yourself and wrote the response "
+        "letter - upload the manuscript as reviewed, your revised manuscript, your response "
+        "letter and the reviews. GrapheAI compares the two manuscripts paragraph by "
+        "paragraph, maps your letter onto every reviewer point, verifies each claimed change "
+        "against the real differences, flags unrequested changes, unsourced numbers and "
+        "dangling figure references, judges the letter's tone, and simulates each reviewer's "
+        "second-round reaction with a predicted decision and a ranked fix list.")
+    c1, c2 = st.columns(2)
+    with c1:
+        o_up = st.file_uploader("Manuscript as reviewed (required)", type=["docx", "pdf", "txt", "md"], key="rc_orig")
+        r_up = st.file_uploader("Your revised manuscript (required)", type=["docx", "pdf", "txt", "md"], key="rc_rev")
+        si_ups = st.file_uploader("Revised supporting files (SI, captions - optional, several)",
+                                  type=["docx", "pdf", "txt", "md"], key="rc_si", accept_multiple_files=True)
+    with c2:
+        l_up = st.file_uploader("Your response letter (file)", type=["docx", "pdf", "txt", "md"], key="rc_letter")
+        l_txt = st.text_area("...or paste the response letter", height=100, key="rc_letter_txt")
+        rv_ups = st.file_uploader("Decision letter + reviews (one or several files)",
+                                  type=["docx", "pdf", "txt", "md"], key="rc_reviews", accept_multiple_files=True)
+        rv_txt = st.text_area("...or paste the reviews", height=100, key="rc_reviews_txt")
+    notes = st.text_area("Notes for the checker (optional): new data you have, constraints, what you "
+                         "deliberately did not do", height=80, key="rc_notes")
+    journal = st.text_input("Journal", key="rc_journal", placeholder="e.g. Joule")
+
+    def _read(up):
+        try:
+            return extract_uploaded_text(up)
+        except Exception as e:
+            st.error(f"Could not read {up.name}: {e}")
+            return ""
+
+    orig_text = _read(o_up) if o_up is not None else ""
+    rev_text = _read(r_up) if r_up is not None else ""
+    letter = (_read(l_up) if l_up is not None else "")
+    if l_txt.strip():
+        letter = (letter + "\n\n" + l_txt.strip()).strip()
+    reviews = "\n\n".join([f"=== FILE: {u.name} ===\n{_read(u)}" for u in (rv_ups or [])] + ([rv_txt.strip()] if rv_txt.strip() else []))
+    si_text = "\n\n".join(f"=== FILE: {u.name} ===\n{_read(u)}" for u in (si_ups or []))
+    if orig_text and rev_text:
+        st.caption(f"as reviewed: {len(orig_text.split()):,} words · revised: {len(rev_text.split()):,} words · "
+                   f"letter: {len(letter.split()):,} words · reviews: {len(reviews.split()):,} words")
+
+    state = st.session_state.get("rc")
+    if state is None:
+        last = rc_load_last_state()
+        if last:
+            if st.button(f"↩️ Reopen the last check ({last['inputs'].get('rev_name', '?')}, {last.get('status')})",
+                         key="rc_reopen"):
+                st.session_state["rc"] = last
+                st.rerun()
+
+    def _start():
+        op, _ = rx_mark_sections(orig_text)
+        rp, _ = rx_mark_sections(rev_text)
+        sig = "rc_" + _rwhash.sha1((orig_text + rev_text + letter + reviews).encode("utf-8", "replace")).hexdigest()[:12]
+        return {"sig": sig, "status": "running", "stages": {}, "log": [],
+                "opts": {"journal": journal.strip()},
+                "inputs": {"orig_name": o_up.name, "rev_name": r_up.name, "orig_text": orig_text, "rev_text": rev_text,
+                           "orig_paragraphs": op, "rev_paragraphs": rp, "letter": letter, "reviews": reviews,
+                           "si_text": si_text, "notes": notes.strip()}}
+
+    def _drive(s_):
+        with st.status("Checking the revision...", expanded=True) as box:
+            try:
+                rc_run(s_, box)
+                box.update(label="Revision check complete", state="complete")
+            except Exception as e:
+                rw_log(s_, f"ERROR: {e}")
+                s_["status"] = "error"
+                rc_save_state(s_)
+                box.update(label=f"Stopped: {e}", state="error")
+                st.error(f"Stopped: {e}. Progress is saved - press Resume.")
+        st.session_state["rc"] = s_
+
+    b1, b2 = st.columns([2, 1])
+    with b1:
+        if state and state.get("status") in ("error", "running") and state["stages"]:
+            if st.button("▶️ Resume", type="primary", key="rc_resume"):
+                state["status"] = "running"
+                _drive(state)
+                st.rerun()
+        elif st.button("🔍 Check my revision", type="primary", key="rc_go",
+                       disabled=not (orig_text and rev_text and letter.strip() and reviews.strip() and api_key.strip())):
+            _drive(_start())
+            st.rerun()
+    with b2:
+        if state and st.button("🗑️ Start over", key="rc_clear"):
+            st.session_state.pop("rc", None)
+            st.rerun()
+    state = st.session_state.get("rc")
+    if not state:
+        return
+    if state["status"] != "complete":
+        with st.expander("Pipeline log"):
+            st.text("\n".join(state.get("log", [])))
+        return
+
+    stg, det, pts = state["stages"], state["stages"]["det"], state["stages"]["points"]
+    st.markdown("---")
+    counts = {}
+    for p in pts:
+        v = stg["audits"][p["id"]]["verdict"]
+        counts[v] = counts.get(v, 0) + 1
+    ok = counts.get("addressed", 0) + counts.get("rebuttal_ok", 0)
+    bad = counts.get("claim_not_found", 0) + counts.get("not_addressed", 0) + counts.get("rebuttal_weak", 0)
+    unreq = [b for b in stg["diffmap"] if not b["points"]]
+    m = st.columns(5)
+    m[0].metric("Points", len(pts))
+    m[1].metric("Addressed", ok, f"{counts.get('partial', 0)} partial" if counts.get("partial") else None)
+    m[2].metric("Problems", bad, "claims not found / not addressed / weak" if bad else None, delta_color="inverse")
+    m[3].metric("Unrequested changes", len(unreq), delta_color="inverse")
+    m[4].metric("Numbers to reconcile", len(det["letter_numbers_missing"]) + len(det["unsourced_numbers"]),
+                delta_color="inverse")
+    t = st.tabs(["🧑‍⚖️ Verdict & fixes", "📋 Point by point", "🔀 Changes", "🔎 Consistency", "🧭 Log"])
+    with t[0]:
+        st.markdown(stg["summary"])
+    with t[1]:
+        st.dataframe([{"id": p["id"], "reviewer": p["reviewer"], "severity": p["severity"],
+                       "verdict": RC_VERDICT_LABEL.get(stg["audits"][p["id"]]["verdict"], stg["audits"][p["id"]]["verdict"]),
+                       "satisfied": f"{stg['audits'][p['id']]['reviewer_satisfied']:.0%}",
+                       "stance": stg["map"][p["id"]].get("stance", ""),
+                       "fix": str(stg["audits"][p["id"]].get("fix", ""))[:160]} for p in pts],
+                     use_container_width=True, hide_index=True)
+        for p in pts:
+            a, mp = stg["audits"][p["id"]], stg["map"][p["id"]]
+            with st.expander(f"{p['id']} · {RC_VERDICT_LABEL.get(a['verdict'], a['verdict'])} · satisfied {a['reviewer_satisfied']:.0%}"):
+                st.markdown(f"**Reviewer:** *{p['text']}*")
+                st.markdown(f"**Your response:** {mp.get('excerpt') or '(none found)'}")
+                if mp.get("claims"):
+                    st.markdown("**Claims:** " + "; ".join(f"{c.get('claim', '')} ({c.get('location', '')})"
+                                                          if isinstance(c, dict) else str(c) for c in mp["claims"]))
+                st.markdown(f"**Evidence:** {a.get('evidence', '')}")
+                if a.get("issues"):
+                    st.markdown("**Issues:** " + "; ".join(str(x) for x in a["issues"]))
+                if a.get("fix"):
+                    st.markdown(f"**Fix:** {a['fix']}")
+    with t[2]:
+        if not det["diffs"]:
+            st.info("The two manuscripts do not differ paragraph by paragraph.")
+        for b in stg["diffmap"]:
+            d = det["diffs"][b["n"] - 1]
+            tag = ", ".join(b["points"]) if b["points"] else "⚠️ unrequested - declare it to the editor"
+            st.markdown(f"**Change {b['n']}** [{tag}]{' · new content' if b['new_content'] else ''} - {b['what']}")
+            st.markdown(d["marked"])
+            st.markdown("---")
+    with t[3]:
+        st.markdown(f"- **Numbers in the letter not found in the revised manuscript / SI / notes / reviews:** "
+                    f"{', '.join(det['letter_numbers_missing']) or 'none'}")
+        st.markdown(f"- **New numbers in the revision without a source:** {', '.join(det['unsourced_numbers']) or 'none'}")
+        st.markdown(f"- **Figure/table references in the letter that do not resolve:** {', '.join(det['refs_missing']) or 'none'}")
+        st.markdown(f"- **Defensive phrases:** {', '.join(det['defensive']) or 'none'}  ·  **Obsequious phrases:** "
+                    f"{', '.join(det['obsequious']) or 'none'}")
+        st.markdown(f"- 'thank' × {det['thanks']} · letter {det['words_letter']} words · manuscript "
+                    f"{det['words_orig']} → {det['words_rev']} words · [AUTHOR] markers left: {len(det['author_markers'])}")
+    with t[4]:
+        st.text("\n".join(state.get("log", [])))
+    p = Path(state.get("docx", ""))
+    if p.exists():
+        st.download_button("⬇️ Revision check (Word)", p.read_bytes(), file_name=p.name,
+                           mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                           key=f"rc_dl_{state['sig']}")
+    st.caption(f"Saved under answers/revision_checks/{state['sig']}/")
+    render_followup(
+        "rc_" + state["sig"], "Discuss the check and fix the letter or the manuscript",
+        {"response_letter": state["inputs"]["letter"], "revised_manuscript": state["inputs"]["rev_text"]},
+        sources_text=("REVIEWS:\n" + state["inputs"]["reviews"][:20000] + "\n\nMANUSCRIPT AS REVIEWED:\n"
+                      + state["inputs"]["orig_text"][:30000] + "\n\nSUPPORTING FILES:\n" + state["inputs"].get("si_text", "")[:15000]
+                      + "\n\nREVISION CHECK REPORT:\n" + stg["report"][:30000]),
+        pool_texts=[state["inputs"]["orig_text"], state["inputs"]["rev_text"], state["inputs"].get("si_text", ""),
+                    state["inputs"].get("notes", ""), state["inputs"]["letter"]],
+        hint="Ask about a verdict, or say what to change - edits are applied to your response letter or "
+             "revised manuscript exactly (numbers must come from the sources or your messages) and the revised "
+             "copies can be downloaded here.")
+
+
 # --------------------------------------------------------------------------
 # App state and sidebar
 # --------------------------------------------------------------------------
@@ -12244,12 +12716,15 @@ with tab_review:
         "Mode", ["Review / respond (report, line edits, structure, polish, rebuttal)",
                  "🧬 Rewrite for a high-impact journal (manuscript + SI + files, staged)",
                  "📨 Respond to reviewers (staged: points → grounded responses → "
-                 "applied changes → before/after diff)"],
+                 "applied changes → before/after diff)",
+                 "🔍 Check my revision (my revised manuscript + my response letter vs the reviews)"],
         horizontal=True, key="rev_mode")
     if rw_mode.startswith("🧬"):
         render_rewrite_panel()
     elif rw_mode.startswith("📨"):
         render_revision_panel()
+    elif rw_mode.startswith("🔍"):
+        render_revision_check_panel()
     else:
         up = st.file_uploader("Document to review",
                               type=["docx", "pdf", "txt", "md"],
