@@ -8360,26 +8360,28 @@ Rules: one point per distinct request or criticism (split compound comments; kee
 OUTPUT: ONLY a JSON object {"points": [{"id": "R1.1", "reviewer": 1, "type": "analysis", "severity": "major", "text": "...", "asks_for": "..."}]} in reading order; ids R<reviewer>.<n> (E.1, E.2 for the editor)."""
 
 RX_RESPOND_SYSTEM = """\
-You draft the authors' point-by-point response for a manuscript under revision at {JOURNAL}, and the exact text changes that back each response. You receive the reviewer points to answer in this batch, the manuscript (with section ids), the Supplementary Information, the AUTHORS' NOTES (what they have done, new data they now have, positions they want to take) and, optionally, numbered passages [n] from the authors' literature corpus.
+You draft the authors' point-by-point response for a manuscript under revision at {JOURNAL}, and the exact text changes that back each response. You receive the reviewer points to answer in this batch, the manuscript (with section ids), the supporting files (Supplementary Information, figure captions, cover letter ... each under '=== FILE: <name> ==='), the AUTHORS' NOTES (what they have done, new data they now have, positions they want to take) and, optionally, numbered passages [n] from the authors' literature corpus.
 
 RULES OF HONESTY - these outrank everything else
-- Never invent a result, a measurement, a number, a figure, a reference or a change that the manuscript, the SI or the authors' notes do not contain. Where a point needs new data, a new experiment or a decision, answer with what CAN be said now and put the rest in an [AUTHOR: ...] marker stating exactly what is needed.
-- Every number in a response or a text change must exist verbatim in the manuscript, the SI or the authors' notes.
+- Never invent a result, a measurement, a number, a figure, a reference or a change that the manuscript, the supporting files or the authors' notes do not contain. Where a point needs new data, a new experiment or a decision, answer with what CAN be said now and put the rest in an [AUTHOR: ...] marker stating exactly what is needed.
+- Every number in a response or a text change must exist verbatim in the manuscript, the supporting files or the authors' notes.
 - Cite literature only as [n] passages provided; never from memory.
-- A rebuttal is allowed when the reviewer is wrong or asks beyond scope: make it with evidence (the manuscript's own data, the SI, [n]) and courtesy.
+- A rebuttal is allowed when the reviewer is wrong or asks beyond scope: make it with evidence (the manuscript's own data, the supporting files, [n]) and courtesy.
 
 STYLE - top-journal response letters
 - One reply per point. Thank the reviewers once (the letter opener is written separately) - not in every reply. Confident, specific, never obsequious or defensive. Lead with the action ("We have added ...", "We agree and now ...", "We respectfully disagree because ...").
-- Point to where the change is: section heading and, when possible, a short quote of the new sentence.
+- Point to where the change is: document, section heading and, when possible, a short quote of the new sentence.
 - Keep each response under ~180 words unless the point is major.
 
 TEXT CHANGES
-For every response that changes the manuscript, give the exact edit as a find/replace pair: "find" is a verbatim substring of the manuscript (40-300 characters, no ellipses, occurring once); "replace_with" is the new text that replaces it (keep everything that should stay). New paragraphs are inserted by including the sentence before them in "find" and repeating it in "replace_with" followed by the new paragraph. Every number in "replace_with" must be in the sources. If a change needs data the authors do not yet have, do not fabricate it: write the sentence with an [AUTHOR: insert ...] marker.
+For every response that changes a document, give the exact edit as a find/replace pair: "doc" is "manuscript" or the exact file name of the supporting file the change belongs to (SI figures, SI tables and SI methods live in the SI file); "find" is a verbatim substring of THAT document (40-300 characters, no ellipses, occurring once); "replace_with" is the new text that replaces it (keep everything that should stay). New paragraphs are inserted by including the sentence before them in "find" and repeating it in "replace_with" followed by the new paragraph. Every number in "replace_with" must be in the sources. If a change needs data the authors do not yet have, do not fabricate it: write the sentence with an [AUTHOR: insert ...] marker.
+
+If a PREVIOUS RESPONSE and an AUTHOR'S INSTRUCTION are given for a point, revise that response as instructed (keep what the instruction does not touch), and return the complete new response and its complete list of changes - the previous changes are discarded.
 
 OUTPUT: ONLY a JSON object:
 {"responses": [{"id": "R1.1", "action": "revised_text | new_data_needed | rebuttal | clarified | out_of_scope",
   "response_md": "the reply text (markdown; [AUTHOR: ...] markers allowed)",
-  "changes": [{"find": "...", "replace_with": "...", "where": "section heading", "why": "one line"}],
+  "changes": [{"doc": "manuscript", "find": "...", "replace_with": "...", "where": "section heading", "why": "one line"}],
   "author_needed": "what only the authors can supply, or empty string"}]}"""
 
 RX_LETTER_SYSTEM = """\
@@ -8508,6 +8510,219 @@ def rx_diff_docx(doc, diffs):
         doc.add_paragraph()
 
 
+def rx_docs(state):
+    """Ordered {doc name: original paragraphs} - manuscript first, then every
+    supporting file (old jobs may carry only si_text)."""
+    inp = state["inputs"]
+    docs = {"manuscript": list(inp["ms_paragraphs"])}
+    for d in inp.get("si_docs") or []:
+        docs[d["name"]] = list(d.get("paragraphs") or rx_mark_sections(d.get("text", ""))[0])
+    if not inp.get("si_docs") and inp.get("si_text"):
+        docs["Supplementary Information"] = rx_mark_sections(inp["si_text"])[0]
+    return docs
+
+
+def rx_sources_text(state, cap_si=60000):
+    """The supporting files as the model sees them (file headers)."""
+    inp = state["inputs"]
+    if inp.get("si_docs"):
+        out, used = [], 0
+        for d in inp["si_docs"]:
+            take = d.get("text", "")[:max(2000, (cap_si - used) // max(1, len(inp["si_docs"])))]
+            used += len(take)
+            out.append(f"=== FILE: {d['name']} ===\n{take}")
+        return "\n\n".join(out)
+    return inp.get("si_text", "")[:cap_si]
+
+
+def rx_pool(state):
+    """Numbers that may appear in changes: manuscript, supporting files,
+    notes of every round, per-point notes and redo instructions."""
+    inp, opts, stg = state["inputs"], state["opts"], state["stages"]
+    texts = [inp["ms_text"], inp.get("si_text", ""), opts.get("notes", "")]
+    texts += [d.get("text", "") for d in inp.get("si_docs") or []]
+    texts += list(opts.get("round_notes") or [])
+    texts += [p.get("note", "") for p in stg.get("points", [])]
+    texts += [it.get("instruction", "") for it in stg.get("iterations", [])]
+    pool = set()
+    for t in texts:
+        pool |= rx_numbers_strict(t or "")
+    return pool
+
+
+def _rx_doc_for_change(ch, docs):
+    """Pick the document a change belongs to: the named one if the text is
+    found there once, else the unique document containing it once."""
+    find = str(ch.get("find", ""))
+    named = str(ch.get("doc") or "manuscript").strip()
+    order = list(docs)
+    keyed = {n.lower(): n for n in docs}
+    cand = keyed.get(named.lower())
+    if not cand:
+        for n in docs:
+            if named.lower() in n.lower() or n.lower() in named.lower():
+                cand = n
+                break
+    if not cand and any(k in named.lower() for k in ("si", "supp")) and len(docs) == 2:
+        cand = order[1]
+    if cand:
+        order = [cand] + [n for n in order if n != cand]
+    if find:
+        for n in order:
+            if sum(p.count(find) for p in docs[n]) == 1:
+                return n
+    return cand or order[0]
+
+
+def rx_apply_all(state):
+    """Apply every change of the answered points to the original documents
+    (idempotent: always from the originals), fill applied / skipped /
+    diff for the manuscript and si_revised / si_diff per supporting file."""
+    stg = state["stages"]
+    pts = [p for p in stg["points"] if p.get("answer", True) is not False]
+    docs = rx_docs(state)
+    pool = rx_pool(state)
+    per_doc = {n: [] for n in docs}
+    for p in pts:
+        for ch in stg["responses"].get(p["id"], {}).get("changes", []) or []:
+            if isinstance(ch, dict):
+                ch = dict(ch, point=p["id"])
+                ch["doc"] = _rx_doc_for_change(ch, docs)
+                per_doc[ch["doc"]].append(ch)
+    applied, skipped = [], []
+    revised = {}
+    for n, paras in docs.items():
+        new, a, s = rx_apply_changes(list(paras), per_doc[n], pool)
+        revised[n] = new
+        applied += a
+        skipped += s
+    stg["revised_paragraphs"] = revised["manuscript"]
+    stg["applied"], stg["skipped"] = applied, skipped
+    stg["diff"] = rx_diff_paragraphs(docs["manuscript"], revised["manuscript"])
+    stg["si_revised"] = {n: revised[n] for n in docs if n != "manuscript"}
+    stg["si_diff"] = {n: rx_diff_paragraphs(docs[n], revised[n]) for n in docs if n != "manuscript"}
+
+
+def rx_assemble_letter(state):
+    """letter_md from the opening/closing (stg['letter']) and the current
+    replies, applied and skipped changes - no model call."""
+    stg = state["stages"]
+    pts = [p for p in stg["points"] if p.get("answer", True) is not False]
+    letter = stg.get("letter") or ""
+    by_rev = {}
+    for p in pts:
+        by_rev.setdefault(p["reviewer"], []).append(p)
+    parts = [letter.split("## Closing")[0].strip(), ""]
+    for rev in sorted(by_rev):
+        parts.append(f"## {'Editor' if rev == 0 else f'Reviewer {rev}'}\n")
+        for p in by_rev[rev]:
+            r = stg["responses"][p["id"]]
+            chg = [c for c in stg["applied"] if c.get("point") == p["id"]]
+            skp = [c for c in stg["skipped"] if c.get("point") == p["id"]]
+            parts.append(f"**{p['id']} ({p['type']}, {p['severity']}).** "
+                         f"*{p['text'].strip()}*\n\n**Response.** {str(r.get('response_md', '')).strip()}")
+            if chg:
+                parts.append("*Changes made:* " + "; ".join(
+                    (f"[{c['doc']}] " if c.get("doc", "manuscript") != "manuscript" else "")
+                    + f"{c.get('where', '')} - \"{str(c.get('replace_with', ''))[:120]}…\"" for c in chg))
+            if skp:
+                parts.append("[AUTHOR: proposed change(s) not applied automatically - "
+                             + "; ".join(f"{c.get('where', '')}: {c.get('reason', '')}" for c in skp) + "]")
+            if r.get("author_needed"):
+                parts.append(f"[AUTHOR: {r['author_needed']}]")
+            parts.append("")
+    closing = letter.split("## Closing")[-1].strip() if "## Closing" in letter else ""
+    stg["letter_md"] = "\n".join(parts) + ("\n\n## Closing\n\n" + closing if closing else "")
+
+
+def rx_snapshot(state, label):
+    """Keep the current letter and revised documents as a numbered version."""
+    stg = state["stages"]
+    vs = state.setdefault("versions", [])
+    vs.append({"n": len(vs) + 1, "label": label,
+               "time": f"{datetime.datetime.now():%Y-%m-%d %H:%M}",
+               "letter_md": stg.get("letter_md", ""),
+               "revised_md": "\n\n".join(stg.get("revised_paragraphs", [])),
+               "si_revised": {n: "\n\n".join(v) for n, v in (stg.get("si_revised") or {}).items()},
+               "n_applied": len(stg.get("applied", [])), "n_skipped": len(stg.get("skipped", []))})
+    del vs[:-12]
+
+
+def rx_rebuild(state, label):
+    """Re-apply changes, re-assemble the letter, rebuild the bundle, keep
+    a version, persist."""
+    rx_apply_all(state)
+    rx_assemble_letter(state)
+    rx_bundle(state)
+    rx_snapshot(state, label)
+    rx_save_state(state)
+
+
+def rx_draft_points(state, grp, instruction="", status_box=None):
+    """One model call drafting (or re-drafting) the given points; stores
+    the responses. `instruction` turns it into a revision of the previous
+    responses."""
+    inp, opts, stg = state["inputs"], state["opts"], state["stages"]
+    corpus = ""
+    if state.get("hits"):
+        corpus = ("\n\n=== LITERATURE PASSAGES FROM THE AUTHORS' CORPUS (cite as [n]) ===\n"
+                  + build_context(state["hits"]))
+    blocks = []
+    for p in grp:
+        b = (f"[{p['id']}] reviewer {p['reviewer']} · {p['type']} · {p['severity']}\n{p['text']}\n"
+             f"ASKS FOR: {p.get('asks_for', '')}")
+        if p.get("note"):
+            b += f"\nAUTHORS' NOTE ON THIS POINT: {p['note']}"
+        prev = stg.get("responses", {}).get(p["id"]) if instruction else None
+        if prev:
+            b += (f"\nPREVIOUS RESPONSE (to revise):\n{str(prev.get('response_md', ''))[:4000]}\n"
+                  f"PREVIOUS CHANGES: {_rwjson.dumps(prev.get('changes', []))[:4000]}\n"
+                  f"AUTHOR'S INSTRUCTION FOR THIS REVISION: {instruction}")
+        blocks.append(b)
+    round_notes = "\n".join(f"- {n}" for n in (opts.get("round_notes") or []) if n.strip())
+    sysm = RX_RESPOND_SYSTEM.replace("{JOURNAL}", opts.get("journal") or "the journal")
+    si = rx_sources_text(state)
+    umsg = (f"POINTS TO ANSWER IN THIS BATCH:\n\n" + "\n\n".join(blocks) + "\n\n"
+            f"=== AUTHORS' NOTES (what has been done / new data / stance) ===\n"
+            f"{opts.get('notes') or '(none given - mark every new-data request [AUTHOR: ...])'}\n"
+            + (f"\n=== AUTHORS' NOTES FROM LATER ROUNDS ===\n{round_notes}\n" if round_notes else "")
+            + f"\n=== MANUSCRIPT (section ids in brackets) ===\n{inp['ms_marked'][:120000]}\n\n"
+            + (f"=== SUPPORTING FILES ===\n{si}\n\n" if si else "")
+            + corpus + "\n\nWrite the responses and changes now (JSON only).")
+    raw = rw_call(sysm, umsg, 9000)
+    resp = (_rw_json_block(raw) or {}).get("responses") or []
+    got = {str(r.get("id")): r for r in resp if isinstance(r, dict)}
+    stg.setdefault("responses", {})
+    for p in grp:
+        r = got.get(p["id"]) or {"id": p["id"], "action": "clarified",
+                                 "response_md": "[AUTHOR: the model returned no response for "
+                                                "this point - write it]",
+                                 "changes": [], "author_needed": ""}
+        r.setdefault("changes", [])
+        if instruction:
+            r["revised_by_instruction"] = instruction
+        stg["responses"][p["id"]] = r
+    rx_save_state(state)
+
+
+def rx_redo_points(state, ids, instruction, round_note=""):
+    """Iteration: re-draft the given points under an instruction (and an
+    optional new round note), then rebuild everything as a new version."""
+    stg, opts = state["stages"], state["opts"]
+    if round_note and round_note.strip():
+        opts.setdefault("round_notes", [])
+        if round_note.strip() not in opts["round_notes"]:
+            opts["round_notes"].append(round_note.strip())
+    state["round"] = int(state.get("round", 1)) + 1
+    stg.setdefault("iterations", []).append(
+        {"round": state["round"], "ids": list(ids), "instruction": instruction,
+         "time": f"{datetime.datetime.now():%Y-%m-%d %H:%M}"})
+    pts = [p for p in stg["points"] if p["id"] in set(ids) and p.get("answer", True) is not False]
+    for bi in range(0, len(pts), 5):
+        rx_draft_points(state, pts[bi:bi + 5], instruction=instruction or "Revise as the notes say.")
+    rx_rebuild(state, f"round {state['round']}: redo {', '.join(ids)}")
+
+
 def rx_run(state, status_box):
     """points -> (checkpoint) -> responses + changes (batched) -> apply ->
     diff -> letter -> bundle."""
@@ -8542,61 +8757,22 @@ def rx_run(state, status_box):
     pts = [p for p in stg["points"] if p.get("answer", True) is not False]
     stg.setdefault("responses", {})
     todo = [p for p in pts if p["id"] not in stg["responses"]]
-    corpus = ""
     if todo and opts.get("ground") and index_ok and "hits" not in state:
         try:
             q = " ".join(p["text"][:200] for p in pts[:6])[:1500]
-            hits = retrieve(q, min(top_k, 10))
-            state["hits"] = hits
+            state["hits"] = retrieve(q, min(top_k, 10))
         except Exception:
             state["hits"] = []
-    if state.get("hits"):
-        corpus = ("\n\n=== LITERATURE PASSAGES FROM THE AUTHORS' CORPUS (cite as [n]) ===\n"
-                  + build_context(state["hits"]))
     batch, n_batches = 5, max(1, (len(todo) + 4) // 5)
     for bi in range(0, len(todo), batch):
         grp = todo[bi:bi + batch]
         step(f"Drafting responses {bi // batch + 1}/{n_batches} "
              f"({', '.join(p['id'] for p in grp)})...")
-        pts_txt = "\n\n".join(f"[{p['id']}] reviewer {p['reviewer']} · {p['type']} · "
-                              f"{p['severity']}\n{p['text']}\nASKS FOR: {p.get('asks_for', '')}"
-                              + (f"\nAUTHORS' NOTE ON THIS POINT: {p['note']}" if p.get("note") else "")
-                              for p in grp)
-        sysm = RX_RESPOND_SYSTEM.replace("{JOURNAL}", opts.get("journal") or "the journal")
-        umsg = (f"POINTS TO ANSWER IN THIS BATCH:\n\n{pts_txt}\n\n"
-                f"=== AUTHORS' NOTES (what has been done / new data / stance) ===\n"
-                f"{opts.get('notes') or '(none given - mark every new-data request [AUTHOR: ...])'}\n\n"
-                f"=== MANUSCRIPT (section ids in brackets) ===\n{inp['ms_marked'][:120000]}\n\n"
-                + (f"=== SUPPLEMENTARY INFORMATION ===\n{inp['si_text'][:40000]}\n\n" if inp.get("si_text") else "")
-                + corpus + "\n\nWrite the responses and changes now (JSON only).")
-        raw = rw_call(sysm, umsg, 9000)
-        resp = (_rw_json_block(raw) or {}).get("responses") or []
-        got = {str(r.get("id")): r for r in resp if isinstance(r, dict)}
-        for p in grp:
-            r = got.get(p["id"]) or {"id": p["id"], "action": "clarified",
-                                     "response_md": "[AUTHOR: the model returned no "
-                                                    "response for this point - write it]",
-                                     "changes": [], "author_needed": ""}
-            r.setdefault("changes", [])
-            stg["responses"][p["id"]] = r
-        rx_save_state(state)
+        rx_draft_points(state, grp)
 
     if "applied" not in stg:
         step("Applying exact-match text changes...")
-        paras = list(inp["ms_paragraphs"])
-        pool = set()
-        for t in [inp["ms_text"], inp.get("si_text", ""), opts.get("notes", "")]:
-            pool |= rx_numbers_strict(t)
-        all_changes = []
-        for p in pts:
-            for ch in stg["responses"][p["id"]].get("changes", []):
-                if isinstance(ch, dict):
-                    all_changes.append(dict(ch, point=p["id"]))
-        paras, applied, skipped = rx_apply_changes(paras, all_changes, pool)
-        stg["revised_paragraphs"] = paras
-        stg["applied"] = applied
-        stg["skipped"] = skipped
-        stg["diff"] = rx_diff_paragraphs(list(inp["ms_paragraphs"]), paras)
+        rx_apply_all(state)
         rx_save_state(state)
 
     if "letter" not in stg:
@@ -8614,32 +8790,10 @@ def rx_run(state, status_box):
 
     if "bundle" not in stg:
         step("Assembling...")
-        by_rev = {}
-        for p in pts:
-            by_rev.setdefault(p["reviewer"], []).append(p)
-        letter_parts = [stg["letter"].split("## Closing")[0].strip(), ""]
-        for rev in sorted(by_rev):
-            letter_parts.append(f"## {'Editor' if rev == 0 else f'Reviewer {rev}'}\n")
-            for p in by_rev[rev]:
-                r = stg["responses"][p["id"]]
-                chg = [c for c in stg["applied"] if c.get("point") == p["id"]]
-                skp = [c for c in stg["skipped"] if c.get("point") == p["id"]]
-                letter_parts.append(f"**{p['id']} ({p['type']}, {p['severity']}).** "
-                                    f"*{p['text'].strip()}*\n\n**Response.** {r.get('response_md', '').strip()}")
-                if chg:
-                    letter_parts.append("*Changes made:* " + "; ".join(
-                        f"{c.get('where', '')} - \"{str(c.get('replace_with', ''))[:120]}…\""
-                        for c in chg))
-                if skp:
-                    letter_parts.append("[AUTHOR: proposed change(s) not applied automatically - "
-                                        + "; ".join(f"{c.get('where', '')}: {c.get('reason', '')}" for c in skp)
-                                        + "]")
-                if r.get("author_needed"):
-                    letter_parts.append(f"[AUTHOR: {r['author_needed']}]")
-                letter_parts.append("")
-        closing = stg["letter"].split("## Closing")[-1].strip() if "## Closing" in stg["letter"] else ""
-        stg["letter_md"] = "\n".join(letter_parts) + ("\n\n## Closing\n\n" + closing if closing else "")
+        rx_assemble_letter(state)
         rx_bundle(state)
+        if not state.get("versions"):
+            rx_snapshot(state, "round 1: first draft")
         try:
             record_qa(f"[RESPONSE TO REVIEWERS] {inp.get('ms_name', '')}", stg["bundle"],
                       state.get("hits", []), do_autosave)
@@ -8651,25 +8805,37 @@ def rx_run(state, status_box):
 
 def rx_bundle(state):
     """(Re)build the bundle text and the Word file from letter_md,
-    revised_paragraphs and diff - also after follow-up edits."""
+    revised_paragraphs, diff and the revised supporting files - also
+    after follow-up edits and iterations."""
     inp, stg = state["inputs"], state["stages"]
     pts = [p for p in stg["points"] if p.get("answer", True) is not False]
     letter_md = stg["letter_md"]
     revised_md = "\n\n".join(stg["revised_paragraphs"])
     diff_md = "\n\n".join(f"**Before:** {d['before']}\n\n**After:** {d['after']}"
                           for d in stg["diff"]) or "(no paragraph changed)"
+    si_md = ""
+    for n, paras in (stg.get("si_revised") or {}).items():
+        dd = (stg.get("si_diff") or {}).get(n) or []
+        if dd:
+            si_md += (f"\n\n---\n\n# Changes in {n} (before / after)\n\n"
+                      + "\n\n".join(f"**Before:** {d['before']}\n\n**After:** {d['after']}" for d in dd)
+                      + f"\n\n---\n\n# Revised {n}\n\n" + "\n\n".join(paras))
     markers = RW_AUTHOR_RE.findall(letter_md + revised_md)
     n_major = sum(1 for p in pts if p.get("severity") == "major")
+    n_si = sum(1 for c in stg["applied"] if c.get("doc", "manuscript") != "manuscript")
     stg["bundle"] = (f"# Response to reviewers - {inp.get('ms_name', '')}\n\n"
                      f"*{len(pts)} points ({n_major} major) · {len(stg['applied'])} text changes "
-                     f"applied · {len(stg['skipped'])} proposed changes need the authors · "
-                     f"[AUTHOR] items: {len(markers)}*\n\n"
-                     "> Every response is grounded in the manuscript, the SI and your notes; "
-                     "nothing was invented. Resolve every [AUTHOR: ...] item, then paste the "
+                     f"applied ({n_si} in supporting files) · {len(stg['skipped'])} proposed changes "
+                     f"need the authors · [AUTHOR] items: {len(markers)}"
+                     + (f" · version {state['versions'][-1]['n']}" if state.get("versions") else "")
+                     + "*\n\n"
+                     "> Every response is grounded in the manuscript, the supporting files and your "
+                     "notes; nothing was invented. Resolve every [AUTHOR: ...] item, then paste the "
                      "letter into the journal's response form.\n\n---\n\n"
                      f"{letter_md}\n\n---\n\n# Summary of changes (before / after)\n\n{diff_md}"
-                     f"\n\n---\n\n# Revised manuscript\n\n{revised_md}")
+                     f"\n\n---\n\n# Revised manuscript\n\n{revised_md}" + si_md)
     stg["revised_md"] = revised_md
+    stg["si_revised_md"] = {n: "\n\n".join(v) for n, v in (stg.get("si_revised") or {}).items()}
     try:
         d = RX_DIR / state["sig"]
         d.mkdir(parents=True, exist_ok=True)
@@ -8682,6 +8848,16 @@ def rx_bundle(state):
         doc.add_page_break()
         doc.add_heading("Revised manuscript (clean)", level=1)
         md_to_docx(doc, revised_md)
+        for n, paras in (stg.get("si_revised") or {}).items():
+            dd = (stg.get("si_diff") or {}).get(n) or []
+            if not dd:
+                continue
+            doc.add_page_break()
+            doc.add_heading(f"Marked changes in {n}", level=1)
+            rx_diff_docx(doc, dd)
+            doc.add_page_break()
+            doc.add_heading(f"Revised {n} (clean)", level=1)
+            md_to_docx(doc, "\n\n".join(paras))
         doc.save(d / "response_bundle.docx")
         state["docx"] = str(d / "response_bundle.docx")
     except Exception as e:
@@ -8689,8 +8865,12 @@ def rx_bundle(state):
 
 
 def rx_mark_sections(text):
-    """Paragraph list + a copy with [S<n>] ids on headings for the model."""
+    """Paragraph list + a copy with [S<n>] ids on headings for the model.
+    Word files arrive with single newlines between paragraphs (no blank
+    lines), so fall back to line splitting when blank lines are absent."""
     paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    if len(paras) <= 2 and text.count("\n") >= 4:
+        paras = [p.strip() for p in text.split("\n") if p.strip()]
     marked, n = [], 0
     for p in paras:
         if re.match(r"^(#+\s|\d+(\.\d+)*\s+[A-Z]|[A-Z][A-Za-z ]{2,40}$)", p) and len(p) < 120:
@@ -8704,24 +8884,28 @@ def rx_mark_sections(text):
 def render_revision_panel():
     st.markdown(
         "**Respond to reviewers - staged.** Upload the manuscript (the version the "
-        "reviewers saw), the SI and the decision letter with the reviews, and add "
-        "your notes (what you have done, new data you now have, where you want to "
-        "push back). The pipeline splits the reviews into numbered points (you "
-        "approve the list), drafts a grounded point-by-point response, proposes "
-        "exact text changes, applies only those that match the manuscript exactly "
-        "and add no unsourced number, and produces the letter, a before/after diff "
-        "and the revised manuscript as one Word bundle.")
+        "reviewers saw), the supporting files (SI, figure captions, cover letter - as "
+        "many as you like) and the decision letter with the reviews, and add your "
+        "notes (what you have done, new data you now have, where you want to push "
+        "back). The pipeline splits the reviews into numbered points (you approve the "
+        "list), drafts a grounded point-by-point response, proposes exact text "
+        "changes in the manuscript AND the supporting files, applies only those that "
+        "match exactly and add no unsourced number, and produces the letter, "
+        "before/after diffs and the revised documents as one Word bundle. Then you "
+        "iterate: edit any reply, redo a point with an instruction, add new facts.")
     st.caption("Nothing is invented: requests for new data become [AUTHOR: ...] "
                "items unless your notes supply them.")
     c1, c2 = st.columns(2)
     with c1:
         ms_up = st.file_uploader("Manuscript as reviewed (required)",
                                  type=["docx", "pdf", "txt", "md"], key="rx_ms")
-        si_up = st.file_uploader("Supplementary Information (optional)",
-                                 type=["docx", "pdf", "txt", "md"], key="rx_si")
+        si_ups = st.file_uploader("Supporting files: SI, captions, cover letter ... (optional, several)",
+                                  type=["docx", "pdf", "txt", "md"], key="rx_si",
+                                  accept_multiple_files=True)
     with c2:
-        rv_up = st.file_uploader("Decision letter + reviews (file)",
-                                 type=["docx", "pdf", "txt", "md"], key="rx_rev")
+        rv_ups = st.file_uploader("Decision letter + reviews (one or several files)",
+                                  type=["docx", "pdf", "txt", "md"], key="rx_rev",
+                                  accept_multiple_files=True)
         rv_txt = st.text_area("...or paste the reviews here", height=120, key="rx_rev_txt")
     notes = st.text_area("Your notes: what you have done, new results (with numbers), "
                          "your stance on each point (optional but decisive)", height=140,
@@ -8739,27 +8923,35 @@ def render_revision_panel():
     with o3:
         ground = st.checkbox("Ground rebuttals in my corpus", value=False,
                              disabled=not index_ok, key="rx_ground")
-    ms_text = ms_name = si_text = reviews = ""
+    ms_text = ms_name = reviews = ""
+    si_docs = []
     if ms_up is not None:
         try:
             ms_text, ms_name = extract_uploaded_text(ms_up), ms_up.name
         except Exception as e:
             st.error(f"Could not read {ms_up.name}: {e}")
-    if si_up is not None:
+    for up in (si_ups or []):
         try:
-            si_text = extract_uploaded_text(si_up)
+            txt = extract_uploaded_text(up)
+            if txt.strip():
+                si_docs.append({"name": up.name, "text": txt, "paragraphs": rx_mark_sections(txt)[0]})
         except Exception as e:
-            st.error(f"Could not read {si_up.name}: {e}")
-    if rv_up is not None:
+            st.error(f"Could not read {up.name}: {e}")
+    si_text = "\n\n".join(f"=== FILE: {d['name']} ===\n{d['text']}" for d in si_docs)
+    rv_parts = []
+    for up in (rv_ups or []):
         try:
-            reviews = extract_uploaded_text(rv_up)
+            rv_parts.append(f"=== FILE: {up.name} ===\n{extract_uploaded_text(up)}")
         except Exception as e:
-            st.error(f"Could not read {rv_up.name}: {e}")
+            st.error(f"Could not read {up.name}: {e}")
     if rv_txt.strip():
-        reviews = (reviews + "\n\n" + rv_txt.strip()).strip()
+        rv_parts.append(rv_txt.strip())
+    reviews = "\n\n".join(rv_parts).strip()
     if ms_text:
         st.caption(f"{ms_name}: {len(ms_text.split()):,} words · reviews: "
-                   f"{len(reviews.split()):,} words · SI: {len(si_text.split()):,} words")
+                   f"{len(reviews.split()):,} words"
+                   + (" · " + " · ".join(f"{d['name']}: {len(d['text'].split()):,} words"
+                                         for d in si_docs) if si_docs else " · no supporting files"))
 
     state = st.session_state.get("rx")
     if state is None:
@@ -8769,16 +8961,23 @@ def render_revision_panel():
                          f"{last.get('status')})", key="rx_resume_disk"):
                 st.session_state["rx"] = last
                 st.rerun()
+        elif last and last.get("status") == "complete":
+            if st.button(f"↩️ Reopen the last response ({last['inputs'].get('ms_name', '?')}) "
+                         "to keep iterating", key="rx_reopen_disk"):
+                st.session_state["rx"] = last
+                st.rerun()
 
     def _start():
         paras, marked = rx_mark_sections(ms_text)
-        sig = _rwhash.sha1((ms_text + reviews).encode("utf-8", "replace")).hexdigest()[:12]
+        sig = _rwhash.sha1((ms_text + reviews + "".join(d["name"] for d in si_docs))
+                           .encode("utf-8", "replace")).hexdigest()[:12]
         return {"sig": "rx_" + sig, "status": "running", "stages": {}, "log": [],
-                "points_approved": False,
+                "points_approved": False, "round": 1, "versions": [],
                 "opts": {"journal": journal.strip(), "notes": notes.strip(),
-                         "pause_points": pause_points, "ground": ground},
+                         "pause_points": pause_points, "ground": ground, "round_notes": []},
                 "inputs": {"ms_name": ms_name, "ms_text": ms_text, "ms_paragraphs": paras,
-                           "ms_marked": marked, "si_text": si_text, "reviews": reviews}}
+                           "ms_marked": marked, "si_text": si_text, "si_docs": si_docs,
+                           "reviews": reviews}}
 
     def _drive(s_):
         with st.status("Working on the response...", expanded=True) as box:
@@ -8845,64 +9044,241 @@ def render_revision_panel():
         return
 
     stg = state["stages"]
+    sig = state["sig"]
     st.markdown("---")
     m1, m2, m3, m4 = st.columns(4)
     pts = [p for p in stg["points"] if p.get("answer", True) is not False]
+    n_si = sum(1 for c in stg["applied"] if c.get("doc", "manuscript") != "manuscript")
     m1.metric("Points answered", len(pts))
-    m2.metric("Changes applied", len(stg["applied"]))
+    m2.metric("Changes applied", len(stg["applied"]), f"{n_si} in supporting files" if n_si else None)
     m3.metric("Changes needing you", len(stg["skipped"]))
     m4.metric("[AUTHOR] items", len(RW_AUTHOR_RE.findall(stg["letter_md"] + stg["revised_md"])))
-    t1, t2, t3, t4 = st.tabs(["📨 Response letter", "🔀 Before / after",
-                              "📄 Revised manuscript", "🧭 Points & log"])
-    with t1:
+    if state.get("versions"):
+        st.caption(f"Version {state['versions'][-1]['n']} ({state['versions'][-1]['label']}) · "
+                   f"round {state.get('round', 1)}")
+    si_names = [n for n, dd in (stg.get("si_diff") or {}).items()]
+    tab_names = ["📨 Response letter", "🔀 Before / after", "📄 Revised manuscript"]
+    if si_names:
+        tab_names.append("📎 Supporting files")
+    tab_names.append("🧭 Points & log")
+    tabs = st.tabs(tab_names)
+    with tabs[0]:
         st.markdown(RW_AUTHOR_RE.sub(lambda m: f"**{m.group(0)}**", stg["letter_md"]))
-    with t2:
+    with tabs[1]:
         if not stg["diff"]:
-            st.info("No paragraph was changed automatically.")
+            st.info("No manuscript paragraph was changed automatically.")
         for d in stg["diff"]:
             st.markdown(d["marked"])
             st.markdown("---")
         if stg["skipped"]:
             st.markdown("**Proposed changes not applied (need you):**")
-            st.dataframe([{"point": c.get("point"), "where": c.get("where"),
-                           "reason": c.get("reason"), "find": str(c.get("find"))[:80],
+            st.dataframe([{"point": c.get("point"), "document": c.get("doc", "manuscript"),
+                           "where": c.get("where"), "reason": c.get("reason"),
+                           "find": str(c.get("find"))[:80],
                            "replace_with": str(c.get("replace_with"))[:120]}
                           for c in stg["skipped"]], use_container_width=True, hide_index=True)
-    with t3:
+    with tabs[2]:
         st.markdown(RW_AUTHOR_RE.sub(lambda m: f"**{m.group(0)}**", stg["revised_md"]))
-    with t4:
+    if si_names:
+        with tabs[3]:
+            for n in si_names:
+                dd = stg["si_diff"].get(n) or []
+                st.markdown(f"### {n} - {len(dd)} changed paragraph(s)")
+                if not dd:
+                    st.caption("No change proposed in this file.")
+                for d in dd:
+                    st.markdown(d["marked"])
+                    st.markdown("---")
+    with tabs[-1]:
         st.dataframe([{"id": p["id"], "reviewer": p["reviewer"], "type": p["type"],
                        "severity": p["severity"], "action": stg["responses"][p["id"]].get("action"),
+                       "changes": len(stg["responses"][p["id"]].get("changes", [])),
                        "text": p["text"][:120]} for p in pts],
                      use_container_width=True, hide_index=True)
+        if stg.get("iterations"):
+            st.markdown("**Iterations**")
+            st.dataframe([{"round": it["round"], "points": ", ".join(it["ids"]),
+                           "instruction": it["instruction"][:160], "time": it["time"]}
+                          for it in stg["iterations"]], use_container_width=True, hide_index=True)
         with st.expander("Pipeline log"):
             st.text("\n".join(state.get("log", [])))
+
+    # downloads
+    docs0 = rx_docs(state)
+    dl = st.columns(3)
     try:
         _tc = tracked_changes_bytes(
-            "\n\n".join(state["inputs"]["ms_paragraphs"]), stg["revised_md"],
+            "\n\n".join(docs0["manuscript"]), stg["revised_md"],
             title=f"Revised manuscript with tracked changes - {state['inputs'].get('ms_name', '')}",
             note="Word revisions applied to the manuscript as reviewed.")
-        st.download_button("⬇️ Revised manuscript with Word Track Changes", _tc,
-                           file_name="revised_tracked.docx",
-                           mime="application/vnd.openxmlformats-officedocument."
-                                "wordprocessingml.document", key="rx_dl_tc")
+        dl[0].download_button("⬇️ Manuscript with Word Track Changes", _tc,
+                              file_name="revised_manuscript_tracked.docx",
+                              mime="application/vnd.openxmlformats-officedocument."
+                                   "wordprocessingml.document", key=f"rx_dl_tc_{sig}")
     except Exception as e:
-        st.caption(f"Tracked-changes export unavailable: {e}")
+        dl[0].caption(f"Tracked-changes export unavailable: {e}")
     p = Path(state.get("docx", ""))
     if p.exists():
-        st.download_button("⬇️ Word bundle (letter + marked changes + clean manuscript)",
-                           p.read_bytes(), file_name=p.name,
-                           mime="application/vnd.openxmlformats-officedocument."
-                                "wordprocessingml.document", key="rx_dl")
-    st.caption(f"Saved under answers/revision_jobs/{state['sig']}/")
+        dl[1].download_button("⬇️ Word bundle (letter + changes + clean documents)",
+                              p.read_bytes(), file_name=p.name,
+                              mime="application/vnd.openxmlformats-officedocument."
+                                   "wordprocessingml.document", key=f"rx_dl_{sig}")
+    for i, n in enumerate(si_names):
+        if not (stg["si_diff"].get(n) or []):
+            continue
+        try:
+            _tc = tracked_changes_bytes("\n\n".join(docs0[n]), stg["si_revised_md"][n],
+                                        title=f"{n} with tracked changes",
+                                        note="Word revisions applied to the file as submitted.")
+            dl[(i + 2) % 3].download_button(f"⬇️ {n} with Word Track Changes", _tc,
+                                            file_name=re.sub(r"\.\w+$", "", n) + "_tracked.docx",
+                                            mime="application/vnd.openxmlformats-officedocument."
+                                                 "wordprocessingml.document", key=f"rx_dl_si_{sig}_{i}")
+        except Exception as e:
+            dl[(i + 2) % 3].caption(f"{n}: tracked-changes export unavailable: {e}")
+    st.caption(f"Saved under answers/revision_jobs/{sig}/")
+
+    # ---------------------------------------------------------- iteration
+    st.markdown("---")
+    st.markdown("## 🔁 Iterate on the response")
+    st.caption("Edit any reply in place, or give an instruction and redo the point - the "
+               "model revises that reply and its text changes, everything is re-applied "
+               "from the original documents, the letter and the Word bundle are rebuilt, "
+               "and the previous state is kept as a version. Numbers you type here count "
+               "as sources. Free-text chat edits to the letter are overwritten by a rebuild, "
+               "so make wording edits on the replies below.")
+    round_note = st.text_area("New facts or notes for this round (optional; apply to every redo)",
+                              key=f"rx_round_note_{sig}", height=80,
+                              placeholder="e.g. New XPS data: Pb 4f shift of 0.3 eV (Fig. S14). "
+                                          "Reviewer 2 is right about the FF; concede it.")
+
+    def _after_change():
+        for p_ in pts:
+            st.session_state.pop(f"rx_edit_{sig}_{p_['id']}", None)
+        st.session_state["rx"] = state
+        st.rerun()
+
+    for p in pts:
+        r = stg["responses"][p["id"]]
+        n_ch = sum(1 for c in stg["applied"] if c.get("point") == p["id"])
+        n_sk = sum(1 for c in stg["skipped"] if c.get("point") == p["id"])
+        flag = " · ✏️ edited" if r.get("edited") else (" · 🔁 revised" if r.get("revised_by_instruction") else "")
+        with st.expander(f"{p['id']} · {p['type']} · {p['severity']} · {r.get('action', '')} · "
+                         f"{n_ch} change(s) applied" + (f", {n_sk} need you" if n_sk else "") + flag):
+            st.markdown(f"*{p['text']}*")
+            st.text_area("Reply (edit freely)", value=str(r.get("response_md", "")),
+                         key=f"rx_edit_{sig}_{p['id']}", height=160)
+            for c in [c for c in stg["applied"] if c.get("point") == p["id"]]:
+                st.caption(f"✔ [{c.get('doc', 'manuscript')}] {c.get('where', '')}: "
+                           f"\"{str(c.get('replace_with', ''))[:140]}…\"")
+            for c in [c for c in stg["skipped"] if c.get("point") == p["id"]]:
+                st.caption(f"✘ [{c.get('doc', 'manuscript')}] {c.get('where', '')}: {c.get('reason', '')}")
+            if r.get("author_needed"):
+                st.caption(f"[AUTHOR] {r['author_needed']}")
+            instr = st.text_input("Instruction to redo this point", key=f"rx_instr_{sig}_{p['id']}",
+                                  placeholder="e.g. Be firmer - we disagree because the SI statistics "
+                                              "show otherwise; quote Table S3. / Also add one sentence "
+                                              "to Methods about the aperture mask.")
+            if st.button("🔁 Redo this point", key=f"rx_redo_{sig}_{p['id']}",
+                         disabled=not (instr.strip() and api_key.strip())):
+                try:
+                    with st.spinner(f"Revising {p['id']}..."):
+                        rx_redo_points(state, [p["id"]], instr.strip(), round_note)
+                except Exception as e:
+                    st.error(f"Redo failed: {e}")
+                else:
+                    _after_change()
+
+    i1, i2, i3 = st.columns([1, 1, 2])
+    with i1:
+        if st.button("💾 Save my edits & rebuild", key=f"rx_save_edits_{sig}",
+                     help="Takes the reply texts above as edited, re-assembles the letter "
+                          "and the Word bundle, keeps a version."):
+            changed = 0
+            for p in pts:
+                v = st.session_state.get(f"rx_edit_{sig}_{p['id']}")
+                r = stg["responses"][p["id"]]
+                if v is not None and v.strip() != str(r.get("response_md", "")).strip():
+                    r["response_md"] = v.strip()
+                    r["edited"] = True
+                    changed += 1
+            rx_rebuild(state, f"manual edits ({changed} repl{'y' if changed == 1 else 'ies'})")
+            st.toast(f"{changed} reply(ies) updated - version {state['versions'][-1]['n']}")
+            _after_change()
+    with i2:
+        if st.button("📝 Rewrite letter opening / closing", key=f"rx_reletter_{sig}",
+                     disabled=not api_key.strip()):
+            try:
+                with st.spinner("Rewriting the opening and closing..."):
+                    summary = "\n".join(f"[{p['id']}] {stg['responses'][p['id']].get('action')}: "
+                                        f"{str(stg['responses'][p['id']].get('response_md'))[:300]}"
+                                        for p in pts)
+                    umsg = (f"MANUSCRIPT TITLE / ID: {state['inputs'].get('ms_name', '')}\n\n"
+                            f"POINT-BY-POINT MATERIAL:\n{summary[:40000]}\n\n"
+                            f"CHANGES APPLIED: {len(stg['applied'])}; changes needing the authors: "
+                            f"{len(stg['skipped'])}"
+                            + (f"\n\nAUTHORS' NOTES:\n{round_note.strip()}" if round_note.strip() else ""))
+                    stg["letter"] = rw_call(RX_LETTER_SYSTEM.replace(
+                        "{JOURNAL}", state["opts"].get("journal") or "the journal"), umsg, 2500)
+                    rx_assemble_letter(state)
+                    rx_bundle(state)
+                    rx_snapshot(state, "letter opening/closing rewritten")
+                    rx_save_state(state)
+            except Exception as e:
+                st.error(f"Letter rewrite failed: {e}")
+            else:
+                _after_change()
+    with i3:
+        sel = st.multiselect("Redo several points with the round notes above",
+                             [p["id"] for p in pts], key=f"rx_redo_sel_{sig}")
+        if st.button("🔁 Redo selected points", key=f"rx_redo_many_{sig}",
+                     disabled=not (sel and api_key.strip() and round_note.strip())):
+            try:
+                with st.spinner(f"Revising {', '.join(sel)}..."):
+                    rx_redo_points(state, sel, "Revise according to the authors' notes from later rounds.",
+                                   round_note)
+            except Exception as e:
+                st.error(f"Redo failed: {e}")
+            else:
+                _after_change()
+
+    if state.get("versions"):
+        with st.expander(f"🕘 Versions ({len(state['versions'])})"):
+            st.dataframe([{"version": v["n"], "label": v["label"], "time": v["time"],
+                           "applied": v["n_applied"], "need you": v["n_skipped"]}
+                          for v in state["versions"]], use_container_width=True, hide_index=True)
+            vsel = st.selectbox("Download a version", [f"v{v['n']} - {v['label']}" for v in state["versions"]],
+                                index=len(state["versions"]) - 1, key=f"rx_ver_sel_{sig}")
+            v = state["versions"][[f"v{x['n']} - {x['label']}" for x in state["versions"]].index(vsel)]
+            vc = st.columns(2)
+            vc[0].download_button("⬇️ Letter (Markdown)", v["letter_md"],
+                                  file_name=f"response_letter_v{v['n']}.md", key=f"rx_ver_dl_l_{sig}")
+            vc[1].download_button("⬇️ Revised manuscript (Markdown)", v["revised_md"],
+                                  file_name=f"revised_manuscript_v{v['n']}.md", key=f"rx_ver_dl_m_{sig}")
+            if st.button("↩️ Restore this version's replies as current", key=f"rx_ver_restore_{sig}",
+                         help="Puts the letter and documents of that version back; a new version "
+                              "is kept so nothing is lost."):
+                stg["letter_md"] = v["letter_md"]
+                stg["revised_paragraphs"] = [x for x in re.split(r"\n\s*\n", v["revised_md"]) if x.strip()]
+                stg["diff"] = rx_diff_paragraphs(docs0["manuscript"], stg["revised_paragraphs"])
+                for n, txt in (v.get("si_revised") or {}).items():
+                    stg.setdefault("si_revised", {})[n] = [x for x in re.split(r"\n\s*\n", txt) if x.strip()]
+                    stg.setdefault("si_diff", {})[n] = rx_diff_paragraphs(docs0.get(n, []), stg["si_revised"][n])
+                rx_bundle(state)
+                rx_snapshot(state, f"restored v{v['n']}")
+                rx_save_state(state)
+                _after_change()
+
     render_followup(
-        "rx_" + state["sig"], "Discuss and revise the response",
-        {"letter": stg["letter_md"], "revised_manuscript": stg["revised_md"]},
+        "rx_" + sig, "Discuss and revise the response (free text)",
+        {"letter": stg["letter_md"], "revised_manuscript": stg["revised_md"],
+         **{f"revised {n}": t for n, t in (stg.get("si_revised_md") or {}).items()}},
         sources_text=("REVIEWS:\n" + state["inputs"]["reviews"][:20000] + "\n\nAUTHORS' NOTES:\n"
-                      + state["opts"].get("notes", "")[:10000] + "\n\nSI:\n"
-                      + state["inputs"].get("si_text", "")[:20000]),
+                      + state["opts"].get("notes", "")[:10000] + "\n"
+                      + "\n".join(state["opts"].get("round_notes") or [])[:5000]
+                      + "\n\nSUPPORTING FILES:\n" + rx_sources_text(state, 20000)),
         pool_texts=[state["inputs"]["ms_text"], state["inputs"].get("si_text", ""),
-                    state["opts"].get("notes", "")],
+                    state["opts"].get("notes", "")] + list(state["opts"].get("round_notes") or []),
         apply_fn=lambda edits, pool: fu_apply_rx(state, edits, pool))
 
 
@@ -9924,12 +10300,34 @@ def fu_apply_cp(state, edits, pool):
 def fu_apply_rx(state, edits, pool):
     stg = state["stages"]
     parts = {"letter": stg["letter_md"], "revised_manuscript": "\n\n".join(stg["revised_paragraphs"])}
-    parts, applied, skipped = fu_apply_parts(parts, edits, pool)
+    for n, paras in (stg.get("si_revised") or {}).items():
+        parts[f"revised {n}"] = "\n\n".join(paras)
+    # an edit that names a document is applied inside that document only
+    # (the letter quotes applied changes, so a find text may occur twice
+    # across parts while being unique in its own document)
+    applied, skipped = [], []
+    for e in edits:
+        want = str(e.get("doc") or "").strip().lower()
+        target = next((n for n in parts if want and (want == n.lower() or want in n.lower()
+                                                     or n.lower() in want)), None)
+        if target:
+            sub, a, s = fu_apply_parts({target: parts[target]}, [e], pool)
+            parts[target] = sub[target]
+        else:
+            parts, a, s = fu_apply_parts(parts, [e], pool)
+        applied += a
+        skipped += s
     if applied:
+        docs = rx_docs(state)
         stg["letter_md"] = parts["letter"]
         stg["revised_paragraphs"] = [p for p in re.split(r"\n\s*\n", parts["revised_manuscript"]) if p.strip()]
-        stg["diff"] = rx_diff_paragraphs(list(state["inputs"]["ms_paragraphs"]), stg["revised_paragraphs"])
+        stg["diff"] = rx_diff_paragraphs(docs["manuscript"], stg["revised_paragraphs"])
+        for n in list((stg.get("si_revised") or {})):
+            new = [p for p in re.split(r"\n\s*\n", parts[f"revised {n}"]) if p.strip()]
+            stg["si_revised"][n] = new
+            stg.setdefault("si_diff", {})[n] = rx_diff_paragraphs(docs.get(n, []), new)
         rx_bundle(state)
+        rx_snapshot(state, "chat edit")
         rx_save_state(state)
     return applied, skipped
 

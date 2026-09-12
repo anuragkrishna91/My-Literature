@@ -148,6 +148,7 @@ GOLDEN_LAST = ANSWERS_DIR / "golden_runs_last.json"
 MAX_CLI_MIN_VERSION = "2.1.251"
 
 WHATS_NEW = [
+    ("Workbench › Review › 📨 Respond to reviewers", "Several supporting files (SI, captions, cover letter) receive exact changes too; iterate after the draft - edit any reply, redo a point with an instruction, add round notes, versions with restore"),
     ("All apps", "ChatGPT subscription backend: GPT-5.6 family and GPT-6-Astra through OpenAI's Codex CLI signed in with your ChatGPT Pro account (no API key); OpenAI API-key backend for any account model"),
     ("Workbench › Review › 🧬 Rewrite", "Library grounding: passages from your corpus cited as [Ln], "
      "positioning map, referee novelty check, 📚 Library tab with reference export"),

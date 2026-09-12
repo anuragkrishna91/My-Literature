@@ -46,11 +46,15 @@ evidence ledger → editorial plan (approve it) → section rewrite → front
 matter → mechanical audit + **PV reporting checklist** + adversarial
 referee → Word bundle; never changes a number, marks gaps as
 [AUTHOR: ...]; upload CSV/XLSX data tables and the figure engine plots
-them column by column) and **📨 Respond to reviewers** (staged: reviews →
-numbered points you approve → grounded point-by-point responses → exact
-text changes applied only when they match the manuscript and add no
-unsourced number → before/after diff → Word bundle with letter, marked
-changes and clean manuscript) · Claim checker · Extract
+them column by column) and **📨 Respond to reviewers** (staged: manuscript
++ any number of supporting files (SI, captions, cover letter) + reviews
+(one or several files) → numbered points you approve → grounded
+point-by-point responses → exact text changes in the manuscript AND the
+supporting files, applied only when they match and add no unsourced
+number → before/after diffs → Word bundle; then **iterate**: edit any
+reply in place, "Redo this point" with an instruction, round notes with
+new facts, redo several points, rewrite the opening, versions with
+restore, Track Changes per document) · Claim checker · Extract
 · Figures (corpus figure search — and **🎨 Figure Studio**: sandbox-rendered
 schematics/workflows/roadmaps/data charts, 300-dpi PNG + SVG, visual QA)
 · Library (comparison matrix, journal scan) · Get Papers (OA +
@@ -114,8 +118,19 @@ feature lives).
 - **Venture Studio → Roadmap tab**: "Grant-to-startup roadmap" turns TRL,
   IP, team and cash facts into a six-lane roadmap with decision gates and
   adds dated milestones to the Gantt.
+- **Respond to reviewers - iteration loop**: after the first draft every
+  point is listed with its reply, its applied/skipped changes and an
+  instruction box. "Redo this point" sends the previous reply, its changes
+  and your instruction back to the model for that point only; "Redo
+  selected points" does the same for several with the round notes; "Save my
+  edits & rebuild" takes your in-place edits. Every rebuild re-applies all
+  changes from the original documents, re-assembles the letter and the
+  Word bundle and keeps a version (download or restore any). Numbers you
+  type in notes, instructions or the chat count as sources; anything else
+  new stays an [AUTHOR: ...] item. "Reopen the last response" on the panel
+  brings a finished job back for more rounds.
 - **Golden runs**: double-click `GoldenRuns.command` (or `python
-  golden_runs.py`) after every update or model change - nine deterministic
+  golden_runs.py`) after every update or model change - ten deterministic
   checks of the Workbench machinery with no model call; exit code 1 on
   failure.
 

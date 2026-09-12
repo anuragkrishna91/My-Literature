@@ -76,7 +76,7 @@ def build_namespace():
             "tracked_changes_docx", "tracked_changes_bytes", "extract_uploaded_table",
             "table_to_text", "_md_runs", "md_to_docx", "_png_width_in", "sub_limits_check",
             "_FuBox", "RX_DIR", "PROP_FIG_DIR", "_codex_parse_events", "_codex_effort",
-            "_codex_error_message", "CODEX_EFFORT_ORDER"}
+            "_codex_error_message", "CODEX_EFFORT_ORDER", "rx_docs", "_rx_doc_for_change"}
     for n in tree.body:
         if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in want:
             exec(ast.get_source_segment(src, n), G)
@@ -200,6 +200,12 @@ def main():
         assert len(applied) == 2 and len(skipped) == 1 and "85" in skipped[0]["reason"]
         diff = G["rx_diff_paragraphs"](paras, new)
         assert len(diff) == 2 and "~~" in diff[0]["marked"]
+        docs = G["rx_docs"]({"inputs": {"ms_paragraphs": paras, "si_docs": [
+            {"name": "si.docx", "text": "Figure S3\n\nJ-V curves of 12 devices.", "paragraphs": ["Figure S3", "J-V curves of 12 devices."]}]}})
+        R = G["_rx_doc_for_change"]
+        assert R({"doc": "si.docx", "find": "J-V curves of 12 devices."}, docs) == "si.docx"
+        assert R({"doc": "manuscript", "find": "J-V curves of 12 devices."}, docs) == "si.docx"
+        assert R({"doc": "SI", "find": "We conclude that LiF passivates the interface."}, docs) == "manuscript"
     check("revision apply + diff", t_revision)
 
     def t_library():
