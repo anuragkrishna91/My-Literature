@@ -24,6 +24,7 @@ Thirteen instruments, three automatic jobs, one shared data pool.
 | `ImpactTracker.command` | 📈 Impact Tracker | 8510 | Citations, h-index & track record (OpenAlex) |
 | `VentureStudio.command` | 🚀 Venture Studio | 8511 | Business case, IP/FTO prep & roadmap (TRANSPIRE) |
 | `IndexPapers.command` | 📚 Indexer | — | Ingest new PDFs/docx into the corpus |
+| `RadarSite.command` | 🌐 PV Radar Site | 8520 (preview) | Public static website built from the PV Radar store |
 
 All run side by side. Stop any app by closing its Terminal window.
 Model defaults: **Frontier (Fable 5.1)** on judgment tasks (thinking
@@ -78,6 +79,17 @@ freshness control, RSS feeds, **patent watch** on WIPO Patentscope,
 keyword alerts) · Trends · Records · Map · Companies · Reports (digest,
 company briefing, detailed report, **investor templates**) · Benchmark
 (your startup vs competition per product segment) · Archive
+
+### 🌐 PV Radar Site
+`radar_site.py` builds a public, dependency-free website into `site/`
+from `answers/pv_radar.json`: Overview · Weekly brief (with weekly
+archive) · News · Papers (OpenAlex) · Efficiency (every stated PCE with
+its evidence grade: certified, peer-reviewed, reported, simulated) ·
+Companies · Primer · About (the published ranking formula). No API key;
+items PV Radar has not analysed are read by conservative rules. It
+never modifies PV Radar's store and never publishes the benchmark,
+reports or spend files. Settings: `answers/pv_site.json`,
+`answers/pv_companies.json`. Details: `docs/radar-site.md`.
 
 ### 🧱 Material Library tabs
 Build (incremental corpus extraction) · Browse & export (dossiers per
@@ -387,7 +399,7 @@ Filename pattern `1001_topic_2025_Title.pdf` enables Topic/Year filters.
 
 `workbench.py` `pvradar.py` `materials.py` `perodeg.py` `analytics.py`
 `fundradar.py` `slides.py` `technoecon.py` `expplan.py` `hub.py`
-`impact.py` `venture.py` — the apps ·
+`impact.py` `venture.py` — the apps · `radar_site.py` + `radar_site_assets/` — the public PV Radar website ·
 `radar_refresh.py` `analytics_refresh.py` `backup.py` — the jobs · `ingest.py`
 `get_papers.py` `workbench_downloader.py` + `literature/` — the corpus
 pipeline · `ask_rules.py` `config.py` `zotero_link.py` — support · `CodexLogin.command` — ChatGPT sign-in for the Codex CLI backend

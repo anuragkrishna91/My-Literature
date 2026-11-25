@@ -10,6 +10,9 @@ See `SYSTEM_GUIDE.md` for the map of instruments, data folders and
 troubleshooting. `golden_runs.py` runs the deterministic self-checks of the
 Workbench machinery without any model call.
 
+`radar_site.py` builds a static public website from the PV Radar store
+(`python radar_site.py build --fetch --serve`); see `docs/radar-site.md`.
+
 The apps expect the `PaperRag` layout (config.py, ingest.py, ask_rules.py,
 papers/, chroma_db/, answers/) next to them; those local files and the
 personal library are not part of this repository.

@@ -1,0 +1,60 @@
+# Builds the PV Radar website without any API key and publishes it to
+# GitHub Pages. It only runs when started by hand (Actions > PV Radar site >
+# Run workflow) until the schedule below is switched on.
+#
+# Before the first run: Settings > Pages > Build and deployment > Source:
+# "GitHub Actions". The published site is public.
+name: PV Radar site
+
+on:
+  workflow_dispatch:
+  # schedule:
+  #   - cron: "23 5 * * *"   # daily, 05:23 UTC
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - id: pages
+        uses: actions/configure-pages@v5
+      - name: Optional site settings and company list kept in the repository
+        run: |
+          mkdir -p radar_data
+          for f in pv_site.json pv_companies.json pv_watchlists.json; do
+            if [ -f "grapheai/radar_site_config/$f" ]; then
+              cp "grapheai/radar_site_config/$f" radar_data/
+            fi
+          done
+      - name: Fetch and build
+        # A hosted runner keeps no files between runs, so the previous
+        # deployment is read back (--seed-url) to carry the history forward.
+        run: >
+          python grapheai/radar_site.py build --fetch
+          --data-dir radar_data --out _site
+          --seed-url "${{ steps.pages.outputs.base_url }}"
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

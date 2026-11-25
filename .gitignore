@@ -12,3 +12,8 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
+
+# PV Radar Site: generated website and its fetched data.
+site/
+_site/
+radar_data/
