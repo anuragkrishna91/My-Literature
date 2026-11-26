@@ -80,7 +80,7 @@ def build_namespace():
             "rc_deterministic", "_rc_figrefs", "RC_FIGREF_RE", "RC_DEFENSIVE", "RC_OBSEQUIOUS",
             "_ver_tuple", "MAX_CLI_MIN", "max_models_blocked", "max_cli_warning", "backend_options",
             "_max_update_command", "_max_too_old_message", "_max_preflight", "_max_unsupported_hint",
-            "EFFORT_LEVELS", "frontier_label", "frontier_index", "active_model_id"}
+            "EFFORT_LEVELS", "frontier_label", "frontier_index", "active_model_id", "_max_options"}
     for n in tree.body:
         if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in want:
             exec(ast.get_source_segment(src, n), G)
@@ -320,6 +320,43 @@ def main():
         labels = list(models)
         assert models["Frontier (Fable 5.2)"] == "claude-fable-5-2" and labels.index("Frontier (Fable 5.2)") == 3, labels
         assert models["Frontier (Fable 5.1)"] == "claude-fable-5-1"
+        # the helpers must be wired into the app, not merely exist
+        def body(name):
+            return next(ast.get_source_segment(src, n) for n in ast.parse(src).body
+                        if isinstance(n, ast.FunctionDef) and n.name == name)
+        for fn in ("call_claude_max", "call_claude_vision_max"):
+            b = body(fn)
+            assert "_max_preflight(claude_code_status(), model)" in b, f"{fn}: no Claude Code check before the call"
+            assert "_max_options(" in b and "ClaudeAgentOptions(" not in b, f"{fn}: effort is not passed on"
+        assert '"Model access", backend_options(),' in src, "sidebar radio is not built from backend_options()"
+        assert 'value=st.session_state.get("effort", "high"),' in src, "effort slider default is not 'high'"
+        assert "index=frontier_index()" in src and 'index=3, key="fs_model"' not in src, "model pickers lost the fallback default"
+        import dataclasses, types as _types
+
+        @dataclasses.dataclass
+        class _Opts:
+            model: str = None
+            effort: str = None
+
+        @dataclasses.dataclass
+        class _OldOpts:
+            model: str = None
+        real_sdk = sys.modules.get("claude_agent_sdk")
+        try:
+            sys.modules["claude_agent_sdk"] = _types.SimpleNamespace(ClaudeAgentOptions=_Opts)
+            G["st"].session_state["effort"] = "max"
+            assert G["_max_options"](model="m").effort == "max"
+            G["st"].session_state["effort"] = "nonsense"
+            assert G["_max_options"](model="m").effort is None
+            sys.modules["claude_agent_sdk"] = _types.SimpleNamespace(ClaudeAgentOptions=_OldOpts)
+            G["st"].session_state["effort"] = "high"
+            assert G["_max_options"](model="m") == _OldOpts(model="m")       # older SDK: field left out
+        finally:
+            G["st"].session_state["effort"] = "xhigh"
+            if real_sdk is None:
+                sys.modules.pop("claude_agent_sdk", None)
+            else:
+                sys.modules["claude_agent_sdk"] = real_sdk
         old_models, G["MODELS"] = G["MODELS"], models
         G["claude_code_status"] = lambda refresh=False: {"version": "2.1.278", "origin": "test", "path": "/x"}
         try:
