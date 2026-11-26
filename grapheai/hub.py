@@ -21,6 +21,51 @@ import subprocess
 import sys
 from pathlib import Path
 
+
+def _grapheai_std_fds():
+    """Child processes must never inherit a dead terminal. An app started
+    from the Hub (or left running after its Terminal window closed) keeps
+    that terminal on stdin; on macOS every Python child then dies at
+    startup with "init_sys_streams: can't initialize sys standard streams
+    ... Bad file descriptor". A Streamlit app never reads stdin, so a
+    terminal on stdin is swapped for /dev/null while it is still alive,
+    and a stdin/stdout/stderr that no longer works at all is replaced too.
+    Anything else on those numbers is left alone: when an app is started
+    with a stream closed, the server's own sockets can live there."""
+    import os
+    for fd, flags in ((0, os.O_RDONLY), (1, os.O_WRONLY), (2, os.O_WRONLY)):
+        try:
+            os.fstat(fd)
+            dead = False
+        except OSError:
+            dead = True
+        try:
+            tty = fd == 0 and not dead and os.isatty(fd)
+        except OSError:
+            tty = False
+        if not (dead or tty):
+            continue
+        try:
+            nul = os.open(os.devnull, flags)
+        except OSError:
+            continue
+        try:
+            if nul == fd:
+                os.set_inheritable(fd, True)        # the number was free: the new handle is it
+            else:
+                os.dup2(nul, fd)
+        except OSError:
+            pass
+        finally:
+            if nul != fd:
+                try:
+                    os.close(nul)
+                except OSError:
+                    pass
+
+
+_grapheai_std_fds()
+
 import streamlit as st
 
 HERE = Path(__file__).parent
@@ -71,7 +116,7 @@ def start_app(pyfile, port):
         [sys.executable, "-m", "streamlit", "run", str(HERE / pyfile),
          "--server.port", str(port), "--server.headless", "true",
          *THEME_FLAGS],
-        cwd=str(HERE), start_new_session=True,
+        cwd=str(HERE), start_new_session=True, stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
@@ -119,7 +164,7 @@ def launchd_status():
     """{label: 'ok'|'error <code>'} for the grapheai jobs (macOS)."""
     try:
         out = subprocess.run(["launchctl", "list"], capture_output=True,
-                             text=True, timeout=5).stdout
+                             text=True, timeout=5, stdin=subprocess.DEVNULL).stdout
     except Exception:
         return {}
     jobs = {}
@@ -148,6 +193,7 @@ GOLDEN_LAST = ANSWERS_DIR / "golden_runs_last.json"
 MAX_CLI_MIN_VERSION = "2.1.251"
 
 WHATS_NEW = [
+    ("All apps", "Fix: indexing and other background jobs no longer fail with \"Fatal Python error: init_sys_streams ... Bad file descriptor\" when an app outlives the Terminal window it was started from (typically: opened from the Hub, then the Hub's window closed)"),
     ("Workbench › Review › 🔍 Check my revision", "Audit of your own revision + response letter against the reviews: claims verified in the real diff, unrequested changes, unsourced numbers, dangling references, tone, simulated reviewer reactions, ranked fixes"),
     ("Workbench › Review › 📨 Respond to reviewers", "Several supporting files (SI, captions, cover letter) receive exact changes too; iterate after the draft - edit any reply, redo a point with an instruction, add round notes, versions with restore"),
     ("All apps", "ChatGPT subscription backend: GPT-5.6 family and GPT-6-Astra through OpenAI's Codex CLI signed in with your ChatGPT Pro account (no API key); OpenAI API-key backend for any account model"),
@@ -179,7 +225,8 @@ def run_golden():
         return {"error": "golden_runs.py not found next to hub.py"}
     try:
         proc = subprocess.run([sys.executable, str(script)], cwd=str(HERE),
-                              capture_output=True, text=True, timeout=900)
+                              capture_output=True, text=True, timeout=900,
+                              stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         return {"error": "golden runs exceeded 15 minutes"}
     rows = []
@@ -224,7 +271,8 @@ def claude_code_versions():
             cands.append(("installed claude", p))
     for origin, p in cands:
         try:
-            v = subprocess.run([p, "--version"], capture_output=True, text=True, timeout=20).stdout
+            v = subprocess.run([p, "--version"], capture_output=True, text=True, timeout=20,
+                               stdin=subprocess.DEVNULL).stdout
             m = re.search(r"(\d+)\.(\d+)\.(\d+)", v or "")
             out.append((origin, p, m.group(0) if m else "?"))
         except Exception:
@@ -250,9 +298,11 @@ def codex_cli_versions():
             continue
         seen.add(p)
         try:
-            v = subprocess.run([p, "--version"], capture_output=True, text=True, timeout=20).stdout
+            v = subprocess.run([p, "--version"], capture_output=True, text=True, timeout=20,
+                               stdin=subprocess.DEVNULL).stdout
             m = re.search(r"(\d+)\.(\d+)\.(\d+)", v or "")
-            s = subprocess.run([p, "login", "status"], capture_output=True, text=True, timeout=20)
+            s = subprocess.run([p, "login", "status"], capture_output=True, text=True, timeout=20,
+                               stdin=subprocess.DEVNULL)
             txt = ((s.stdout or "") + (s.stderr or "")).strip().splitlines()
             out.append((origin, p, m.group(0) if m else "?", txt[0] if txt else "?"))
         except Exception:
@@ -327,7 +377,8 @@ def start_background(pyfile, logname):
     with open(log, "ab") as fh:
         fh.write(f"\n=== started {datetime.datetime.now():%Y-%m-%d %H:%M:%S} ===\n".encode())
         subprocess.Popen([sys.executable, str(HERE / pyfile)], cwd=str(HERE),
-                         stdout=fh, stderr=subprocess.STDOUT, start_new_session=True)
+                         stdin=subprocess.DEVNULL, stdout=fh, stderr=subprocess.STDOUT,
+                         start_new_session=True)
     return log
 
 

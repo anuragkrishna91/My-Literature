@@ -263,6 +263,52 @@ def main():
         assert "clearly" in d["defensive"] and "the reviewer is wrong" in d["defensive"] and d["thanks"] == 1
     check("revision check: diff, numbers, references, tone", t_revcheck)
 
+    def t_child_stdin():
+        import os, subprocess
+        names = ("workbench.py", "pvradar.py", "materials.py", "perodeg.py", "analytics.py", "fundradar.py",
+                 "slides.py", "technoecon.py", "expplan.py", "impact.py", "venture.py", "hub.py")
+        apps = [HERE / n for n in names if (HERE / n).exists()]     # GrapheAI's own apps only
+        assert WB in apps
+        for p in apps:
+            src = p.read_text(encoding="utf-8", errors="replace")
+            lines = src.split("\n")
+            assert "_grapheai_std_fds()\n\nimport streamlit as st" in src, f"{p.name}: startup guard missing"
+            for n in ast.walk(ast.parse(src)):
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) \
+                        and isinstance(n.func.value, ast.Name) and n.func.value.id == "subprocess" \
+                        and n.func.attr in ("run", "Popen", "check_output", "check_call", "call"):
+                    kws = {k.arg for k in n.keywords}
+                    before = "\n".join(lines[max(0, n.lineno - 12):n.lineno])
+                    named = "stdin" in kws or (None in kws and 'kw["stdin"] = subprocess.DEVNULL' in before)
+                    assert named, f"{p.name}:{n.lineno} starts a child without naming its stdin"
+        if os.name != "posix":
+            return
+        # the startup guard: a terminal on stdin is swapped for /dev/null while it is
+        # alive (a child must not wait on it), and a live descriptor that merely sits
+        # on number 0 - a server socket after a start with stdin closed - is not touched
+        src = WB.read_text(encoding="utf-8")
+        guard = next(ast.get_source_segment(src, n) for n in ast.parse(src).body
+                     if isinstance(n, ast.FunctionDef) and n.name == "_grapheai_std_fds")
+        body = ("import os, subprocess, sys\n" + guard + "\n_grapheai_std_fds()\n"
+                "p = subprocess.run([sys.executable, '-c', \"import sys; print(42 if sys.stdin.read() == '' else 'stdin kept')\"],\n"
+                "                   capture_output=True, text=True, timeout=60)\n"
+                "sys.stdout.write(p.stdout + p.stderr[-300:])\n")
+        master, slave = os.openpty()
+        try:
+            r = subprocess.run([sys.executable, "-c", body], capture_output=True, text=True,
+                               stdin=slave, timeout=120)
+        finally:
+            os.close(master)
+            os.close(slave)
+        assert r.stdout.strip() == "42", (r.stdout + r.stderr)[-300:]
+        body = ("import os, socket, sys\nos.close(0)\na, b = socket.socketpair()\n"
+                "assert 0 in (a.fileno(), b.fileno())\n" + guard + "\n_grapheai_std_fds()\n"
+                "a.send(b'ok')\nsys.stdout.write(b.recv(2).decode())\n")
+        r = subprocess.run([sys.executable, "-c", body], capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL, timeout=120)
+        assert r.stdout.strip() == "ok", (r.stdout + r.stderr)[-300:]
+    check("child processes never inherit a dead terminal", t_child_stdin)
+
     width = max(len(r[0]) for r in RESULTS)
     fails = 0
     print(f"\nGrapheAI golden runs - {datetime.datetime.now():%Y-%m-%d %H:%M} - workbench.py "

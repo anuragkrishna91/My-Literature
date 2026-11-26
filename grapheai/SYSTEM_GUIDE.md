@@ -151,7 +151,7 @@ feature lives).
   applies exact edits to your response letter or revised manuscript and
   offers the revised copies for download.
 - **Golden runs**: double-click `GoldenRuns.command` (or `python
-  golden_runs.py`) after every update or model change - eleven deterministic
+  golden_runs.py`) after every update or model change - twelve deterministic
   checks of the Workbench machinery with no model call; exit code 1 on
   failure.
 
@@ -375,6 +375,7 @@ Filename pattern `1001_topic_2025_Title.pdf` enables Topic/Year filters.
 | "Not logged in" in Max mode | `claude` → `/login` → subscription → `/exit` |
 | "Claude Code x.y.z does not support this model" | `/opt/miniconda3/bin/pip install -U claude-agent-sdk`, restart the app (the SDK bundles its own Claude Code) |
 | Max usage-limit message | Sidebar → API key, or wait for the window |
+| "Indexing reported an error" with `Fatal Python error: init_sys_streams ... Bad file descriptor` | The app outlived the Terminal window it was started from (typically: opened from the Hub, then the Hub's Terminal was closed), so Python children inherited a dead terminal. Fixed in the apps (children now get `/dev/null` as stdin). On an older copy: restart the app from its launcher, or double-click `IndexPapers.command` |
 | ChatGPT backend: "Codex CLI not found" / "not signed in" | double-click `CodexLogin.command`, then **Re-check** in the sidebar |
 | ChatGPT backend: model missing from the list | update the CLI (`npm install -g @openai/codex` or `brew upgrade codex`), Re-check; or type the exact id |
 | Import button greyed out (PeroDeg/Analytics) | A required name/mapping field is empty |

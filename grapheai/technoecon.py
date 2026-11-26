@@ -29,6 +29,51 @@ import re
 from pathlib import Path
 
 import sys
+
+def _grapheai_std_fds():
+    """Child processes must never inherit a dead terminal. An app started
+    from the Hub (or left running after its Terminal window closed) keeps
+    that terminal on stdin; on macOS every Python child then dies at
+    startup with "init_sys_streams: can't initialize sys standard streams
+    ... Bad file descriptor". A Streamlit app never reads stdin, so a
+    terminal on stdin is swapped for /dev/null while it is still alive,
+    and a stdin/stdout/stderr that no longer works at all is replaced too.
+    Anything else on those numbers is left alone: when an app is started
+    with a stream closed, the server's own sockets can live there."""
+    import os
+    for fd, flags in ((0, os.O_RDONLY), (1, os.O_WRONLY), (2, os.O_WRONLY)):
+        try:
+            os.fstat(fd)
+            dead = False
+        except OSError:
+            dead = True
+        try:
+            tty = fd == 0 and not dead and os.isatty(fd)
+        except OSError:
+            tty = False
+        if not (dead or tty):
+            continue
+        try:
+            nul = os.open(os.devnull, flags)
+        except OSError:
+            continue
+        try:
+            if nul == fd:
+                os.set_inheritable(fd, True)        # the number was free: the new handle is it
+            else:
+                os.dup2(nul, fd)
+        except OSError:
+            pass
+        finally:
+            if nul != fd:
+                try:
+                    os.close(nul)
+                except OSError:
+                    pass
+
+
+_grapheai_std_fds()
+
 import streamlit as st
 
 ANSWERS_DIR = Path("answers")
@@ -128,7 +173,7 @@ def _claude_cli_version(path):
     import subprocess
     try:
         out = subprocess.run([path, "--version"], capture_output=True, text=True,
-                             timeout=20).stdout
+                             timeout=20, stdin=subprocess.DEVNULL).stdout
         m = re.search(r"(\d+)\.(\d+)\.(\d+)", out or "")
         return m.group(0) if m else ""
     except Exception:
@@ -428,8 +473,12 @@ def _codex_env(path):
 
 def _codex_run(path, args, stdin_text=None, timeout=120, cwd=None):
     import subprocess
-    return subprocess.run([path] + list(args), input=stdin_text, capture_output=True,
-                          text=True, timeout=timeout, env=_codex_env(path), cwd=cwd)
+    kw = dict(capture_output=True, text=True, timeout=timeout, env=_codex_env(path), cwd=cwd)
+    if stdin_text is None:
+        kw["stdin"] = subprocess.DEVNULL        # never the app's own (possibly dead) terminal
+    else:
+        kw["input"] = stdin_text
+    return subprocess.run([path] + list(args), **kw)
 
 
 def codex_status(refresh=False):
