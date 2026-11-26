@@ -77,7 +77,10 @@ def build_namespace():
             "table_to_text", "_md_runs", "md_to_docx", "_png_width_in", "sub_limits_check",
             "_FuBox", "RX_DIR", "PROP_FIG_DIR", "_codex_parse_events", "_codex_effort",
             "_codex_error_message", "CODEX_EFFORT_ORDER", "rx_docs", "_rx_doc_for_change",
-            "rc_deterministic", "_rc_figrefs", "RC_FIGREF_RE", "RC_DEFENSIVE", "RC_OBSEQUIOUS"}
+            "rc_deterministic", "_rc_figrefs", "RC_FIGREF_RE", "RC_DEFENSIVE", "RC_OBSEQUIOUS",
+            "_ver_tuple", "MAX_CLI_MIN", "max_models_blocked", "max_cli_warning", "backend_options",
+            "_max_update_command", "_max_too_old_message", "_max_preflight", "_max_unsupported_hint",
+            "EFFORT_LEVELS", "frontier_label", "frontier_index", "active_model_id"}
     for n in tree.body:
         if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in want:
             exec(ast.get_source_segment(src, n), G)
@@ -308,6 +311,78 @@ def main():
                            stdin=subprocess.DEVNULL, timeout=120)
         assert r.stdout.strip() == "ok", (r.stdout + r.stderr)[-300:]
     check("child processes never inherit a dead terminal", t_child_stdin)
+
+    def t_models_backends():
+        import os
+        src = WB.read_text(encoding="utf-8")
+        models = next(ast.literal_eval(n.value) for n in ast.parse(src).body
+                      if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "MODELS" for t in n.targets))
+        labels = list(models)
+        assert models["Frontier (Fable 5.2)"] == "claude-fable-5-2" and labels.index("Frontier (Fable 5.2)") == 3, labels
+        assert models["Frontier (Fable 5.1)"] == "claude-fable-5-1"
+        old_models, G["MODELS"] = G["MODELS"], models
+        G["claude_code_status"] = lambda refresh=False: {"version": "2.1.278", "origin": "test", "path": "/x"}
+        try:
+            B = G["max_models_blocked"]
+            assert B("2.1.332") == [] and B("2.1.290") == []
+            assert B("2.1.289") == ["Frontier (Fable 5.2)"] and B("2.1.278") == ["Frontier (Fable 5.2)"]
+            assert B("2.1.250") == ["Frontier (Fable 5.2)", "Frontier (Fable 5.1)"]
+            w = G["max_cli_warning"]({"version": "2.1.278", "origin": "installed claude"})
+            assert "2.1.290" in w and "Frontier (Fable 5.2)" in w and "Frontier (Fable 5.1)" in w.split("Until then")[1]
+            try:
+                G["_max_preflight"]({"version": "2.1.278", "origin": "t"}, "claude-fable-5-2")
+                raise AssertionError("preflight let an old Claude Code through")
+            except RuntimeError as e:
+                assert "2.1.290 or newer" in str(e) and "pip install -U claude-agent-sdk" in str(e)
+            G["_max_preflight"]({"version": "2.1.278", "origin": "t"}, "claude-fable-5-1")
+            G["_max_preflight"]({"version": "2.1.290", "origin": "t"}, "claude-fable-5-2")
+            G["_max_preflight"]({}, "claude-fable-5-2")                      # unknown version: let the call decide
+            # a stale "too old" reading is checked again before a call is refused
+            G["claude_code_status"] = lambda refresh=False: {"version": "2.1.332" if refresh else "2.1.278",
+                                                             "origin": "test", "path": "/new"}
+            got = G["_max_preflight"]({"version": "2.1.278", "origin": "t", "path": "/old"}, "claude-fable-5-2")
+            assert got["version"] == "2.1.332" and got["path"] == "/new", got
+            same = {"version": "2.1.300", "origin": "t", "path": "/p"}
+            assert G["_max_preflight"](same, "claude-fable-5-2") is same
+            G["claude_code_status"] = lambda refresh=False: {"version": "2.1.278", "origin": "test", "path": "/x"}
+            G["st"].session_state.update(backend="codex", codex_model="gpt-6-astra")
+            assert G["active_model_id"]("claude-fable-5-2") == "gpt-6-astra"
+            G["st"].session_state["backend"] = "max"
+            assert G["active_model_id"]("claude-fable-5-2") == "claude-fable-5-2"
+            st_ = G["st"].session_state
+            for ver, want in (("2.1.332", "Frontier (Fable 5.2)"), ("2.1.290", "Frontier (Fable 5.2)"),
+                              ("2.1.278", "Frontier (Fable 5.1)"), ("2.1.200", "Deep (Opus 5)")):
+                G["claude_code_status"] = lambda refresh=False, v=ver: {"version": v, "origin": "test", "path": "/x"}
+                st_["backend"] = "max"
+                assert G["frontier_label"]() == want and labels[G["frontier_index"]()] == want, (ver, G["frontier_label"]())
+                st_["backend"] = "codex"                               # Claude Code version is irrelevant there
+                assert G["frontier_label"]() == "Frontier (Fable 5.2)"
+            G["claude_code_status"] = lambda refresh=False: {}          # no Claude Code found: keep the newest
+            st_["backend"] = "max"
+            assert G["frontier_label"]() == "Frontier (Fable 5.2)"
+            st_["backend"] = "api"
+            G["claude_code_status"] = lambda refresh=False: {"version": "2.1.278", "origin": "test", "path": "/x"}
+            msg = G["_max_too_old_message"]({"version": "2.1.278", "origin": "t"}, "claude-fable-5-2", "2.1.290")
+            assert msg.rstrip().endswith("Frontier (Fable 5.1).") and "Frontier (Fable 5.2)" not in msg.split("Until then")[1], msg[-200:]
+            msg = G["_max_too_old_message"]({"version": "2.1.200", "origin": "t"}, "claude-fable-5-1", "2.1.251")
+            assert "Fable" not in msg.split("Until then")[1] and "Deep (Opus 5)" in msg.split("Until then")[1]
+            assert G["_max_too_old_message"]({}, "claude-fable-5-2", "2.1.290").rstrip().endswith("choose another model.")
+            h = G["_max_unsupported_hint"](Exception("API Error: 400 Claude Code 2.1.278 does not support this "
+                                                     "model; version 2.1.290 or newer is required."), "claude-fable-5-2")
+            assert h and "2.1.290 or newer" in h and "API key" not in h
+            saved = os.environ.pop("GRAPHEAI_API_BACKENDS", None)
+            try:
+                opts = G["backend_options"]()
+                assert len(opts) == 2 and "Max" in opts[0] and "Codex" in opts[1] and not any("API" in o for o in opts), opts
+                os.environ["GRAPHEAI_API_BACKENDS"] = "1"
+                assert len(G["backend_options"]()) == 4
+            finally:
+                os.environ.pop("GRAPHEAI_API_BACKENDS", None)
+                if saved is not None:
+                    os.environ["GRAPHEAI_API_BACKENDS"] = saved
+        finally:
+            G["MODELS"] = old_models
+    check("subscriptions only + Fable 5.2 + Claude Code gate", t_models_backends)
 
     width = max(len(r[0]) for r in RESULTS)
     fails = 0

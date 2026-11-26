@@ -26,8 +26,9 @@ Thirteen instruments, three automatic jobs, one shared data pool.
 | `IndexPapers.command` | 📚 Indexer | — | Ingest new PDFs/docx into the corpus |
 
 All run side by side. Stop any app by closing its Terminal window.
-Model defaults: **Frontier (Fable 5.1)** on judgment tasks (thinking
-always on; depth set by the sidebar **Reasoning effort**, default xhigh),
+Model defaults: **Frontier (Fable 5.2)** on judgment tasks (thinking
+always on; depth set by the sidebar **Reasoning effort**, default high;
+Fable 5.1 stays selectable),
 Balanced = Sonnet 5, Deep = Opus 5, Fast = Haiku 4.5 for bulk extraction —
 every surface has a picker. Long outputs stream; refusal fallbacks are
 enabled automatically where the installed SDK supports them.
@@ -97,7 +98,7 @@ Below the instruments: **Golden runs** (run the nine self-checks and see
 the PASS/FAIL table; the last result is kept), **Library index** (documents
 on disk, index age, files newer than the index, one-click re-index and
 backup in the background with logs), **Claude access & versions** (newest
-Claude Code found and whether it suits Fable 5.1, package versions, disk
+Claude Code found and whether it suits Fable 5.2, package versions, disk
 use), **Jobs** (rewrites, reviews, career documents and responses in
 progress or recently completed) and **What's new** (where each recent
 feature lives).
@@ -151,7 +152,7 @@ feature lives).
   applies exact edits to your response letter or revised manuscript and
   offers the revised copies for download.
 - **Golden runs**: double-click `GoldenRuns.command` (or `python
-  golden_runs.py`) after every update or model change - twelve deterministic
+  golden_runs.py`) after every update or model change - thirteen deterministic
   checks of the Workbench machinery with no model call; exit code 1 on
   failure.
 
@@ -307,24 +308,27 @@ Progress · Interpret. Bayesian mode needs `pip install scikit-learn`.
 
 ---
 
-## Claude access
-**Max mode** (default): via Claude Code login; if "Not logged in" →
-`claude` → `/login` → subscription option. **API key**: overflow +
-batch. Spend + budget shared across all apps (`answers/spend.json`).
-Fable 5.1 = deepest reasoning (use effort 'max' for the hardest judgments); drop to Sonnet 5 when the Max window runs low.
+## Model access
+Every sidebar offers two backends, both subscriptions - no API key
+anywhere:
 
-**OpenAI backend** (third option in every sidebar): enter an OpenAI API
-key, then pick any model from the live list of your account or type its
-exact id. Calls use the official `openai` SDK (`/opt/miniconda3/bin/pip
-install -U openai`): Responses API with the reasoning effort from the
-slider (xhigh/max → high), falling back automatically if a model rejects
-the reasoning parameter or the Responses API. The figure critic sends
-images to OpenAI too. Cost is tracked only when you enter the model's
-prices per million tokens; the model id shown in the Claude selector is
-ignored in this mode. Model names change often - the list from your
-account is the authority, not the app.
+**Claude Max** (default): calls run through Claude Code and count against
+your Max plan. If "Not logged in": in Terminal run `claude`, type exactly
+`/login`, choose the **Claude subscription** option (not "API usage
+billing"), finish in the browser, `/exit`. Models: **Frontier (Fable 5.2)**
+is the default for judgment tasks, Fable 5.1 stays in the list, Deep =
+Opus 5, Balanced = Sonnet 5, Fast = Haiku 4.5. The **Reasoning effort**
+slider now applies in Max mode too: `high` is the recommended default for
+Fable 5.2; use `xhigh` or `max` for the hardest judgments (slower, uses
+more of the plan window), `low` for quick lookups. Drop to Sonnet 5 when
+the Max window runs low, or switch to the ChatGPT subscription.
 
-**ChatGPT subscription backend** (fourth option in every sidebar): your
+**The pay-per-use API backends are no longer in the menu** (Anthropic API
+key, OpenAI API key), and with them the dollar counter and the monthly
+budget box. The code is still there: to bring both options back, start an
+app with `GRAPHEAI_API_BACKENDS=1` in the environment.
+
+**ChatGPT subscription** (second option in every sidebar): your
 ChatGPT Plus/Pro plan without an API key, through OpenAI's official Codex
 CLI - the same idea as Claude Max through Claude Code. One-time setup:
 double-click `CodexLogin.command` (installs the CLI with Homebrew or npm
@@ -344,12 +348,18 @@ the window or switch backend.
 
 **Keeping Max mode current.** The Python package `claude-agent-sdk` ships
 its own copy of Claude Code and uses it by default, so a new model can be
-refused ("Claude Code 2.1.233 does not support this model; version 2.1.251
+refused ("Claude Code 2.1.278 does not support this model; version 2.1.290
 or newer is required") even after `claude update`. Fix:
 `/opt/miniconda3/bin/pip install -U claude-agent-sdk`, then restart the
 app. Every app now runs the newest Claude Code it can find (bundled or
 installed) and shows its version under the backend switch in the sidebar,
-with a warning when it is older than Fable 5.1 needs (2.1.251).
+with a warning naming the models it is too old for: Fable 5.2 needs
+Claude Code 2.1.290 or newer, Fable 5.1 needs 2.1.251. A call with a
+model the installed Claude Code cannot run stops at once with the same
+fix instead of failing halfway. Until Claude Code is updated the apps
+default to Fable 5.1 on their own, so nothing breaks; after updating,
+press **Re-check Claude Code** under the warning (or restart the app) and
+Fable 5.2 becomes the default.
 
 ---
 
@@ -372,9 +382,9 @@ Filename pattern `1001_topic_2025_Title.pdf` enables Topic/Year filters.
 
 | Symptom | Fix |
 |---|---|
-| "Not logged in" in Max mode | `claude` → `/login` → subscription → `/exit` |
+| "Not logged in" / "OAuth session expired" in Max mode | Terminal: `claude`, then type exactly `/login` (with the slash), choose the Claude subscription, `/exit` |
 | "Claude Code x.y.z does not support this model" | `/opt/miniconda3/bin/pip install -U claude-agent-sdk`, restart the app (the SDK bundles its own Claude Code) |
-| Max usage-limit message | Sidebar → API key, or wait for the window |
+| Max usage-limit message | Sidebar → ChatGPT subscription, a smaller model, or wait for the window |
 | "Indexing reported an error" with `Fatal Python error: init_sys_streams ... Bad file descriptor` | The app outlived the Terminal window it was started from (typically: opened from the Hub, then the Hub's Terminal was closed), so Python children inherited a dead terminal. Fixed in the apps (children now get `/dev/null` as stdin). On an older copy: restart the app from its launcher, or double-click `IndexPapers.command` |
 | ChatGPT backend: "Codex CLI not found" / "not signed in" | double-click `CodexLogin.command`, then **Re-check** in the sidebar |
 | ChatGPT backend: model missing from the list | update the CLI (`npm install -g @openai/codex` or `brew upgrade codex`), Re-check; or type the exact id |

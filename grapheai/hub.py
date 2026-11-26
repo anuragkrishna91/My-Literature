@@ -190,10 +190,12 @@ def days_left(deadline):
 # Maintenance helpers (no AI calls)
 # --------------------------------------------------------------------------
 GOLDEN_LAST = ANSWERS_DIR / "golden_runs_last.json"
-MAX_CLI_MIN_VERSION = "2.1.251"
+MAX_CLI_MIN = {"Fable 5.2": "2.1.290", "Fable 5.1": "2.1.251"}     # Claude Code needed per model
+MAX_CLI_MIN_VERSION = MAX_CLI_MIN["Fable 5.2"]
 
 WHATS_NEW = [
     ("All apps", "Fix: indexing and other background jobs no longer fail with \"Fatal Python error: init_sys_streams ... Bad file descriptor\" when an app outlives the Terminal window it was started from (typically: opened from the Hub, then the Hub's window closed)"),
+    ("All apps", "Subscriptions only: the sidebar offers Claude Max and the ChatGPT subscription; the pay-per-use API-key backends are gone from the menu. Fable 5.2 is the new frontier model (needs Claude Code 2.1.290 or newer). The reasoning-effort slider now also applies in Claude Max mode"),
     ("Workbench › Review › 🔍 Check my revision", "Audit of your own revision + response letter against the reviews: claims verified in the real diff, unrequested changes, unsourced numbers, dangling references, tone, simulated reviewer reactions, ranked fixes"),
     ("Workbench › Review › 📨 Respond to reviewers", "Several supporting files (SI, captions, cover letter) receive exact changes too; iterate after the draft - edit any reply, redo a point with an instruction, add round notes, versions with restore"),
     ("All apps", "ChatGPT subscription backend: GPT-5.6 family and GPT-6-Astra through OpenAI's Codex CLI signed in with your ChatGPT Pro account (no API key); OpenAI API-key backend for any account model"),
@@ -265,7 +267,7 @@ def claude_code_versions():
         pass
     home = Path.home()
     for p in [shutil.which("claude"), home / ".claude/local/claude", home / ".npm-global/bin/claude",
-              "/usr/local/bin/claude", "/opt/homebrew/bin/claude"]:
+              "/usr/local/bin/claude", "/opt/homebrew/bin/claude", home / ".local/bin/claude"]:
         p = str(p) if p else ""
         if p and Path(p).is_file() and p not in {c[1] for c in cands}:
             cands.append(("installed claude", p))
@@ -522,8 +524,13 @@ with c1:
 with c2:
     spend = _read_json(ANSWERS_DIR / "spend.json", {})
     month = datetime.date.today().strftime("%Y-%m")
-    st.metric("API spend " + month,
-              f"${float(spend.get(month, 0.0)):.2f}")
+    if float(spend.get(month, 0.0)) > 0:
+        st.metric("API spend " + month,
+                  f"${float(spend.get(month, 0.0)):.2f}")
+    else:
+        st.metric("Model access", "Subscriptions",
+                  help="Claude Max through Claude Code and ChatGPT Plus/Pro through "
+                       "the Codex CLI. No pay-per-use API calls this month.")
 
 with c3:
     zpath, zts = newest_backup()
@@ -696,12 +703,14 @@ with m3:
     ccs = claude_code_versions()
     if ccs:
         best = max(ccs, key=lambda c: _ver_tuple(c[2]))
-        ok = _ver_tuple(best[2]) >= _ver_tuple(MAX_CLI_MIN_VERSION)
-        (st.success if ok else st.warning)(
+        too_old = [m for m, need in MAX_CLI_MIN.items()
+                   if _ver_tuple(best[2]) < _ver_tuple(need)]
+        (st.warning if too_old else st.success)(
             f"Claude Code {best[2]} ({best[0]}) - "
-            + ("fine for Fable 5.1" if ok else
-               f"older than {MAX_CLI_MIN_VERSION}: run "
-               f"`{sys.executable} -m pip install -U claude-agent-sdk`"))
+            + (f"too old for {' and '.join(too_old)} (needs "
+               f"{MAX_CLI_MIN[too_old[0]]} or newer): run "
+               f"`{sys.executable} -m pip install -U claude-agent-sdk`"
+               if too_old else "fine for Fable 5.2"))
         if len(ccs) > 1:
             st.caption(" · ".join(f"{o}: {v}" for o, _p, v in ccs))
     else:

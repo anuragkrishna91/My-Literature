@@ -12,7 +12,7 @@ Tabs:
   Library        - browse all indexed papers; summarise or chat with a
                    single paper.
 
-Sidebar: API key, model selector (Haiku/Sonnet/Opus), answer mode,
+Sidebar: model access (Claude Max / ChatGPT subscription), model selector, answer mode,
 retrieval depth, auto-save toggle, session exports, token counter.
 Every answer is auto-saved as .docx and .md in the 'answers' folder.
 """
@@ -85,6 +85,7 @@ MODELS = {
     "Fast (Haiku 4.5)": "claude-haiku-4-5",
     "Balanced (Sonnet 5)": "claude-sonnet-5",
     "Deep (Opus 5)": "claude-opus-5",
+    "Frontier (Fable 5.2)": "claude-fable-5-2",
     "Frontier (Fable 5.1)": "claude-fable-5-1",
 }
 
@@ -1240,6 +1241,7 @@ PRICES = {
     "claude-opus-5": (5.00, 25.00),
     "claude-fable-5": (10.00, 50.00),
     "claude-fable-5-1": (10.00, 50.00),
+    "claude-fable-5-2": (8.00, 40.00),
 }
 
 
@@ -1349,7 +1351,61 @@ def _ver_tuple(v):
     return tuple(int(x) for x in re.findall(r"\d+", str(v))[:3]) or (0,)
 
 
-MAX_CLI_MIN_VERSION = "2.1.251"      # Fable 5.1 needs at least this Claude Code
+# Minimum Claude Code per model for Max mode (older versions answer "does
+# not support this model"). Checked against real Claude Code builds.
+MAX_CLI_MIN = {"claude-fable-5-2": "2.1.290", "claude-fable-5-1": "2.1.251"}
+MAX_CLI_MIN_VERSION = MAX_CLI_MIN["claude-fable-5-2"]     # what the newest model needs
+
+
+def max_models_blocked(version):
+    """Labels of the models this Claude Code version is too old for."""
+    return [lab for lab, mid in MODELS.items()
+            if _ver_tuple(version) < _ver_tuple(MAX_CLI_MIN.get(mid, "0"))]
+
+
+def max_cli_warning(cc):
+    """Sidebar text when the Claude Code found cannot run every model."""
+    blocked = max_models_blocked(cc["version"])
+    if not blocked:
+        return ""
+    need = max((MAX_CLI_MIN[MODELS[b]] for b in blocked), key=_ver_tuple)
+    usable = [lab for lab in MODELS if lab not in blocked]
+    return (f"Claude Code {cc['version']} ({cc['origin']}) is too old for "
+            f"{', '.join(blocked)} (needs {need} or newer). Run in Terminal, "
+            f"then restart the app: `{_max_update_command()}`. Until then choose "
+            f"{' / '.join(usable)}.")
+
+
+def frontier_label():
+    """The strongest model the current backend can run: Fable 5.2, or Fable
+    5.1 when Max mode's Claude Code is too old for it. Used for every
+    default and for the calls that have no model picker."""
+    order = [lab for lab in ("Frontier (Fable 5.2)", "Frontier (Fable 5.1)", "Deep (Opus 5)")
+             if lab in MODELS] or list(MODELS)[-1:]
+    if st.session_state.get("backend", "max") == "max":
+        ver = (claude_code_status() or {}).get("version")
+        if ver:
+            blocked = set(max_models_blocked(ver))
+            order = [lab for lab in order if lab not in blocked] or order
+    return order[0]
+
+
+def frontier_index():
+    return list(MODELS).index(frontier_label())
+
+
+def backend_options():
+    """Backends offered in the sidebar: the two subscriptions. The
+    pay-per-use API backends (Anthropic API key, OpenAI API key) stay in
+    the code but are offered only when GRAPHEAI_API_BACKENDS=1 is set in
+    the environment before the app starts."""
+    import os
+    opts = ["Claude Max subscription (via Claude Code)",
+            "ChatGPT subscription (Plus/Pro via Codex CLI)"]
+    if os.environ.get("GRAPHEAI_API_BACKENDS", "").strip().lower() in ("1", "true", "yes", "on"):
+        opts += ["Anthropic API key (pay per use)",
+                 "OpenAI API (ChatGPT models, pay per use)"]
+    return opts
 
 
 def claude_code_status(refresh=False):
@@ -1374,6 +1430,58 @@ def _max_update_command():
     return f"{sys.executable} -m pip install -U claude-agent-sdk"
 
 
+def _max_too_old_message(status, model, need):
+    have = status.get("version", "unknown")
+    usable = ([lab for lab, mid in MODELS.items()
+               if mid != model and lab not in max_models_blocked(status["version"])]
+              if status.get("version") else [])
+    return (f"Claude Code {have} ({status.get('origin', 'not found')}) is too old "
+            f"for {model}: version {need} or newer is required. Fix in "
+            f"Terminal, then restart the app:\n    {_max_update_command()}\n"
+            "(claude-agent-sdk ships its own Claude Code; that command updates "
+            "it. `claude update` works too - GrapheAI uses the newest Claude "
+            "Code it finds.) Until then choose "
+            + (" / ".join(usable) if usable else "another model") + ".")
+
+
+def _max_preflight(status, model):
+    """Fail at once, with the fix, when the Claude Code found is known to
+    be too old for the chosen model - instead of a doomed call. Before
+    refusing, look again: Claude Code may have been updated since the
+    version was read. Returns the status to use for the call."""
+    need = MAX_CLI_MIN.get(str(model))
+
+    def too_old(s):
+        return bool(need and s.get("version") and _ver_tuple(s["version"]) < _ver_tuple(need))
+
+    if too_old(status):
+        status = claude_code_status(refresh=True) or status
+        if too_old(status):
+            raise RuntimeError(_max_too_old_message(status, model, need))
+    return status
+
+
+def active_model_id(model):
+    """The model that really answers on the selected backend (the Claude
+    picker is ignored on the ChatGPT backends)."""
+    b = st.session_state.get("backend")
+    if b == "codex":
+        return st.session_state.get("codex_model") or "chatgpt-subscription"
+    if b == "openai":
+        return st.session_state.get("openai_model") or "openai"
+    return model
+
+
+def _max_options(**kw):
+    """ClaudeAgentOptions carrying the sidebar's reasoning effort when the
+    installed Agent SDK knows the field (older SDKs: Claude Code's default)."""
+    from claude_agent_sdk import ClaudeAgentOptions
+    eff = st.session_state.get("effort", "high")
+    if eff in EFFORT_LEVELS and "effort" in getattr(ClaudeAgentOptions, "__dataclass_fields__", {}):
+        kw.setdefault("effort", eff)
+    return ClaudeAgentOptions(**kw)
+
+
 def _max_unsupported_hint(err, model):
     """Turn Claude Code's 'does not support this model; version X or newer
     is required' into a message that says exactly what to run."""
@@ -1382,15 +1490,7 @@ def _max_unsupported_hint(err, model):
                   str(err), re.I)
     if not m:
         return None
-    status = claude_code_status()
-    have = status.get("version", "unknown")
-    return (f"Claude Code {have} ({status.get('origin', 'not found')}) is too old "
-            f"for {model}: version {m.group(1)} or newer is required. Fix in "
-            f"Terminal, then restart the app:\n    {_max_update_command()}\n"
-            "(claude-agent-sdk ships its own Claude Code; that command updates "
-            "it. `claude update` works too - GrapheAI uses the newest Claude "
-            "Code it finds.) Until then choose 'Fast (Haiku 4.5)' or switch the "
-            "sidebar to 'API key'.")
+    return _max_too_old_message(claude_code_status(), model, m.group(1))
 
 
 def call_claude_max(system, user_msg, model, max_tokens=None):
@@ -1399,7 +1499,8 @@ def call_claude_max(system, user_msg, model, max_tokens=None):
 
     Needs one-time setup (see MAX_SETUP.txt): `pip install claude-agent-sdk`
     (it bundles Claude Code) and a Claude Code login with the Max account.
-    ChatGPT subscription: through OpenAI's Codex CLI signed in with your ChatGPT Plus/Pro account. Personal use of your own subscriptions only. max_tokens is not enforced on
+    Personal use of your own subscription only. The sidebar's reasoning
+    effort is passed on when the SDK supports it. max_tokens is not enforced on
     this path (the CLI manages output length itself). New models need a
     recent Claude Code: the app runs the newest copy it can find.
     """
@@ -1412,14 +1513,14 @@ def call_claude_max(system, user_msg, model, max_tokens=None):
             "Claude Max mode needs the Agent SDK. One-time setup (Terminal):\n"
             f"1) {_max_update_command()}\n"
             "2) Run `claude` once and log in with your Claude (Max) account\n"
-            "Or switch the sidebar back to 'API key'. See MAX_SETUP.txt."
+            "Or switch the sidebar to the ChatGPT subscription."
         ) from exc
     import asyncio
-    status = claude_code_status()
+    status = _max_preflight(claude_code_status(), model)
     extra = {"cli_path": status["path"]} if status.get("path") else {}
 
     async def _run():
-        opts = ClaudeAgentOptions(
+        opts = _max_options(
             system_prompt=system,
             model=model,
             max_turns=1,
@@ -1452,8 +1553,8 @@ def call_claude_max(system, user_msg, model, max_tokens=None):
     if not text.strip():
         raise RuntimeError(
             "Claude Code returned no text. If this mentions usage limits, "
-            "your Max plan may be at its cap - switch the sidebar to "
-            "'API key' to continue, or wait for the limit to reset.")
+            "your Max plan may be at its cap - switch the sidebar to the "
+            "ChatGPT subscription to continue, or wait for the limit to reset.")
     try:
         _track_usage(int(usage.get("input_tokens", 0)),
                      int(usage.get("output_tokens", 0)))
@@ -1515,7 +1616,7 @@ def _model_family(model):
 
 
 def _api_kwargs(model, system, user_msg, max_tokens):
-    """Request parameters tuned per model family. Fable 5.1: thinking is
+    """Request parameters tuned per model family. Fable 5.x: thinking is
     always on and its depth is set with output_config.effort (the
     sidebar's 'Reasoning effort'); Opus 5 the same; Opus 4.8 / Sonnet 5
     need adaptive thinking requested explicitly; Haiku gets none."""
@@ -1524,9 +1625,9 @@ def _api_kwargs(model, system, user_msg, max_tokens):
           "max_tokens": _effective_max_tokens(model, max_tokens),
           "system": system,
           "messages": [{"role": "user", "content": user_msg}]}
-    effort = st.session_state.get("effort", "xhigh")
+    effort = st.session_state.get("effort", "high")
     if effort not in EFFORT_LEVELS:
-        effort = "xhigh"
+        effort = "high"
     if fam in ("fable", "opus5"):
         kw["output_config"] = {"effort": effort}
     elif fam == "adaptive":
@@ -2098,7 +2199,7 @@ def render_openai_sidebar():
 
 def call_claude(api_key, system, user_msg, model, max_tokens=None):
     """Single Claude call via the selected backend; tracks token usage.
-    Backend 'api': the Anthropic API (Fable 5.1 with effort-controlled
+    Backend 'api': the Anthropic API (Fable 5.x with effort-controlled
     reasoning, streaming, refusal fallbacks). Backend 'max': the Claude
     Agent SDK, billed to the Claude Max plan."""
     if st.session_state.get("backend") == "codex":
@@ -4003,8 +4104,9 @@ def render_rewrite_panel():
         "marks everything it needs from you as `[AUTHOR: ...]`.")
     st.caption("Best input is the .docx (PDF extraction can garble numbers "
                "and superscript citations). Everything uploaded here goes "
-               "to the Claude backend - keep confidential referee material "
-               "out if that is not acceptable.")
+               "to the provider of the selected backend (Anthropic through "
+               "Claude Code, or OpenAI through the Codex CLI) - keep "
+               "confidential referee material out if that is not acceptable.")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -6928,7 +7030,7 @@ def call_claude_vision_max(system, text, png_path, model, max_turns=4):
                                   TextBlock, ResultMessage)
     import asyncio
     p = Path(png_path).resolve()
-    status = claude_code_status()
+    status = _max_preflight(claude_code_status(), model)
     extra = {"cli_path": status["path"]} if status.get("path") else {}
     prompt = (f"First use the Read tool to view the image file '{p.name}' in the "
               "current working directory (it is a PNG figure). Then answer the "
@@ -6938,7 +7040,7 @@ def call_claude_vision_max(system, text, png_path, model, max_turns=4):
         # Read is pre-approved through allowed_tools; no permission mode
         # override (bypassPermissions is refused for root users and is not
         # needed for a read-only tool).
-        opts = ClaudeAgentOptions(
+        opts = _max_options(
             system_prompt=system, model=model, max_turns=max_turns,
             allowed_tools=["Read"], cwd=str(p.parent),
             disallowed_tools=["Bash", "Edit", "Write", "Glob", "Grep",
@@ -7005,6 +7107,9 @@ def fig_max_vision_ok(model, refresh=False):
         png, svg = d / "probe.png", d / "probe.svg"
         res = fig_render(fig_probe_source(), png, svg, width="single", height_mm=45)
         if res.get("ok"):
+            if _cli_ver := claude_code_status().get("version"):
+                if MAX_CLI_MIN.get(str(model)) and _ver_tuple(_cli_ver) < _ver_tuple(MAX_CLI_MIN[str(model)]):
+                    model = MODELS[frontier_label()]      # seeing images is a property of Claude Code
             ans = call_claude_vision_max(
                 "You describe images precisely.",
                 "Reply with exactly the word and the number printed in the image, "
@@ -7015,6 +7120,8 @@ def fig_max_vision_ok(model, refresh=False):
             detail = res.get("error", "")[:200]
     except Exception as e:
         detail = str(e)[:200]
+        if re.search(r"too old for|does not support this model|not logged in|/login|session expired|usage limit|rate limit", str(e), re.I):
+            return False                    # says nothing about images: do not remember it
     st.session_state[key] = ok
     try:
         FIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -7050,7 +7157,7 @@ class _fig_effort:
 
     def __enter__(self):
         self.prev = st.session_state.get("effort")
-        cur = self.prev if self.prev in self._ORDER else "xhigh"
+        cur = self.prev if self.prev in self._ORDER else "high"
         if self.cap in self._ORDER and self._ORDER.index(self.cap) < self._ORDER.index(cur):
             st.session_state["effort"] = self.cap
         return self
@@ -8278,11 +8385,11 @@ def render_figure_studio():
                                                "ACS"], key="fs_j")
     with c3:
         vision = st.checkbox("Visual QA pass", value=True, key="fs_qa",
-                             help="API backend: the image is reviewed directly. "
-                                  "Max backend: Claude Code reads the PNG, after a "
-                                  "one-time probe confirms it can see images.")
+                             help="Claude Max: Claude Code reads the PNG, after a "
+                                  "one-time probe confirms it can see images. "
+                                  "ChatGPT subscription: the image is attached.")
     with c4:
-        fs_model = st.selectbox("Model", list(MODELS), index=3, key="fs_model")
+        fs_model = st.selectbox("Model", list(MODELS), index=frontier_index(), key="fs_model")
     epi = st.selectbox("Epistemic status of any mechanism shown",
                        ["DIRECT (shown by data)", "INDIRECT (consistent with data)",
                         "SPECULATIVE (proposal)"], key="fs_epi")
@@ -9477,7 +9584,7 @@ def render_calibrated_evaluation(instrument, criteria, _prop_retrieve):
     if st.button("Evaluate proposal", type="primary", key="pe_go",
                  disabled=(pe_up is None and not pe_ptxt)):
         if not api_key.strip():
-            st.error("Needs the API key or Max backend (sidebar).")
+            st.error("Needs a signed-in model backend (sidebar).")
         else:
             pe_name = pe_up.name if pe_up else pe_pname
             try:
@@ -11419,15 +11526,11 @@ with st.sidebar:
     st.title("✍️ Workbench")
     st.caption("by GrapheAI · Dr. Anurag Krishna")
     backend_label = st.radio(
-        "Claude access", ["API key (pay per use)",
-                          "Claude Max subscription (needs Claude Code)",
-                          "OpenAI API (ChatGPT models, pay per use)",
-                          "ChatGPT subscription (Plus/Pro via Codex CLI)"],
-        help="API key: bills per token via console.anthropic.com - works "
-             "anywhere. Claude Max: routes calls through Claude Code so they "
-             "count against your Max plan, but requires the Claude Code app "
-             "installed (blocked on some managed/company laptops). See "
-             "MAX_SETUP.txt. Personal use of your own subscription only.")
+        "Model access", backend_options(),
+        help="Claude Max: calls run through Claude Code and count against "
+             "your Max plan. ChatGPT subscription: calls run through OpenAI's "
+             "Codex CLI signed in with your ChatGPT Plus/Pro account. "
+             "Personal use of your own subscriptions only.")
     st.session_state["backend"] = ("max" if "Max" in backend_label
                                     else "codex" if "Codex" in backend_label
                                     else "openai" if "OpenAI" in backend_label
@@ -11447,32 +11550,42 @@ with st.sidebar:
         if not _cc:
             st.warning("Claude Code not found for Max mode - run "
                        f"`{_max_update_command()}` and log in with `claude`.")
-        elif _ver_tuple(_cc["version"]) < _ver_tuple(MAX_CLI_MIN_VERSION):
-            st.warning(f"Claude Code {_cc['version']} ({_cc['origin']}) is older "
-                       f"than {MAX_CLI_MIN_VERSION}, which Fable 5.1 needs. Run in "
-                       f"Terminal, then restart: `{_max_update_command()}`. Until "
-                       "then choose Haiku 4.5 or the API-key backend.")
+        elif max_models_blocked(_cc["version"]):
+            st.warning(max_cli_warning(_cc))
         else:
             st.caption(f"Claude Code {_cc['version']} ({_cc['origin']})")
-    model_label = st.selectbox("Model", list(MODELS.keys()), index=3,
-                               help="Frontier (Fable) is the default for "
+        if (not _cc or max_models_blocked(_cc["version"])) and st.button(
+                "Re-check Claude Code", key="max_recheck",
+                help="After installing or updating Claude Code."):
+            _new = claude_code_status(refresh=True)
+            st.session_state.pop("_max_vision_ok", None)
+            if _new and "Frontier (Fable 5.2)" not in max_models_blocked(_new["version"]):
+                # pickers that fell back to Fable 5.1 return to the new default
+                for _k in [k for k, v in st.session_state.items()
+                           if isinstance(v, str) and v == "Frontier (Fable 5.1)"]:
+                    del st.session_state[_k]
+            st.rerun()
+    model_label = st.selectbox("Model", list(MODELS.keys()), index=frontier_index(),
+                               help="Frontier (Fable 5.2) is the default for "
                                     "professor-grade judgement. Drop to "
                                     "Sonnet for quick lookups or if the "
-                                    "Max usage window runs low.")
+                                    "Max usage window runs low. Ignored on "
+                                    "the ChatGPT subscription.")
     model = MODELS[model_label]
     st.session_state["effort"] = st.select_slider(
         "Reasoning effort", options=list(EFFORT_LEVELS),
-        value=st.session_state.get("effort", "xhigh"),
-        help="Thinking depth for Fable 5.1 / Opus 5 / Sonnet 5 on the API "
-             "backend. xhigh = professor-grade default; max = when "
-             "correctness matters more than time; low = quick lookups.")
+        value=st.session_state.get("effort", "high"),
+        help="Thinking depth, on Claude Max and on the ChatGPT subscription. "
+             "high = recommended default for Fable 5.2; xhigh / max = the "
+             "hardest judgments (slower, uses more of the plan); low = "
+             "quick lookups.")
     answer_mode = st.selectbox("Answer mode", list(ANSWER_MODES.keys()))
     top_k = st.slider("Passages to retrieve", 3, 25, config.TOP_K)
     do_rerank = st.toggle(
         "🎯 Re-rank evidence (Haiku)", value=False,
         help="Retrieves 3x candidates and lets Haiku keep only the most "
              "relevant ones. Sharper citations in Ask and Draft, a few "
-             "seconds slower, fractions of a cent per query.")
+             "seconds slower, one extra small call per query.")
     do_autosave = st.toggle("Auto-save answers (.docx + .md)", value=True)
     st.markdown("---")
     try:
@@ -11604,7 +11717,7 @@ with tab_ask:
                         st.error(f"Claude API error: {e}")
                         answer = None
             else:
-                answer = ("(Search-only mode - no API key entered. "
+                answer = ("(Search-only mode - no model backend signed in. "
                           "See retrieved passages below.)")
             if answer is not None:
                 record_qa(q, answer, hits, do_autosave)
@@ -11667,7 +11780,7 @@ with tab_draft:
 
         if draft_submitted and brief.strip() and index_ok:
             if not api_key.strip():
-                st.error("Drafting needs the API key (sidebar).")
+                st.error("Drafting needs a signed-in model backend (sidebar).")
             else:
                 if target_words <= 800:
                     with st.spinner("Retrieving evidence..."):
@@ -12101,11 +12214,14 @@ with tab_prop:
     st.markdown("Draft, refine, and **mock-evaluate grant proposals** "
                 "(Horizon Europe, EIC, MSCA), grounded in your paper corpus "
                 "and your **own past proposals and evaluation reports**.")
-    st.caption("⚠️ Confidentiality: proposal text is sent to the Anthropic "
-               "API for processing (not used for training by default). For "
-               "consortium material under NDA, check you may process it via "
-               "a cloud API. Criteria/thresholds evolve - always verify "
-               "against the current call's work programme.")
+    st.caption("⚠️ Confidentiality: proposal text is sent for processing to "
+               "the provider of the backend selected in the sidebar - "
+               "Anthropic (Claude Max through Claude Code) or OpenAI (ChatGPT "
+               "subscription through the Codex CLI); how each handles your "
+               "data follows that subscription's own settings. For "
+               "consortium material under NDA, check you may process it "
+               "with that cloud provider. Criteria/thresholds evolve - "
+               "always verify against the current call's work programme.")
 
     p1, p2 = st.columns([2, 2])
     with p1:
@@ -12188,7 +12304,7 @@ with tab_prop:
                      disabled=not (cc_up is not None
                                    and call_text.strip())):
             if not api_key.strip():
-                st.error("Needs the API key (sidebar).")
+                st.error("Needs a signed-in model backend (sidebar).")
             else:
                 try:
                     cc_text = extract_uploaded_text(cc_up).strip()[:150000]
@@ -12246,7 +12362,7 @@ with tab_prop:
         if st.button("🧭 Write SOTA & beyond", type="primary", key="so_go",
                      disabled=not so_idea.strip()):
             if not api_key.strip():
-                st.error("Needs the API key (sidebar).")
+                st.error("Needs a signed-in model backend (sidebar).")
             else:
                 import json as _json
                 idea = so_idea.strip()
@@ -12327,7 +12443,7 @@ with tab_prop:
         if st.button("🗂️ Generate work plan", type="primary", key="wp_go",
                      disabled=not wp_src.strip()):
             if not api_key.strip():
-                st.error("Needs the API key (sidebar).")
+                st.error("Needs a signed-in model backend (sidebar).")
             else:
                 sys_p = WORKPLAN_SYSTEM.format(n_wp=wp_n,
                                                months=wp_months,
@@ -12391,7 +12507,7 @@ with tab_prop:
                  if n_sec else "Draft sections")
         if st.button(label, type="primary", disabled=not ready):
             if not api_key.strip():
-                st.error("Needs the API key (sidebar).")
+                st.error("Needs a signed-in model backend (sidebar).")
             else:
                 bar = st.progress(0.0, text="Drafting…")
                 results, all_hits = [], []
@@ -12557,7 +12673,7 @@ with tab_prop:
 
         if st.button("Revise proposal", type="primary", disabled=not rv_text):
             if not api_key.strip():
-                st.error("Needs the API key (sidebar).")
+                st.error("Needs a signed-in model backend (sidebar).")
             else:
                 feedback_all = "\n\n".join(
                     t for t in (rv_esr_text, rv_feedback.strip()) if t)
@@ -12704,7 +12820,7 @@ with tab_prop:
         btn_label = ("Complete my draft" if completing else "Refine section")
         if st.button(btn_label, type="primary", disabled=not pr_text):
             if not api_key.strip():
-                st.error("Needs the API key (sidebar).")
+                st.error("Needs a signed-in model backend (sidebar).")
             else:
                 hits = _prop_retrieve(pr_text[:1500], 12 if completing else 8,
                                       8 if completing else 6)
@@ -12815,7 +12931,7 @@ with tab_review:
 
         if st.button("Review document", type="primary", disabled=up is None):
             if not api_key.strip():
-                st.error("Reviewing needs the API key (sidebar).")
+                st.error("Reviewing needs a signed-in model backend (sidebar).")
             elif review_mode == RESP_MODE and not reviewer_comments.strip():
                 st.error("Paste or upload the reviewer comments first.")
             else:
@@ -12932,7 +13048,7 @@ with tab_claims:
                                            "p-i-n devices.")
     if st.button("Check claims", type="primary", disabled=not index_ok):
         if not api_key.strip():
-            st.error("Claim checking needs the API key (sidebar).")
+            st.error("Claim checking needs a signed-in model backend (sidebar).")
         else:
             claims = [c.strip() for c in claims_text.splitlines() if c.strip()]
             report_lines = [f"# Claim check - "
@@ -13017,7 +13133,7 @@ with tab_extract:
         if st.button("Extract table", type="primary",
                      disabled=not sel_papers or not ex_fields):
             if not api_key.strip():
-                st.error("Extraction needs the API key (sidebar).")
+                st.error("Extraction needs a signed-in model backend (sidebar).")
             else:
                 import json as _json
                 bar = st.progress(0.0, text="Extracting...")
@@ -13160,7 +13276,7 @@ with tab_extract:
                     if st.button("🧠 Write benchmarking paragraph",
                                  use_container_width=True):
                         if not api_key.strip():
-                            st.error("Needs the API key (sidebar).")
+                            st.error("Needs a signed-in model backend (sidebar).")
                         else:
                             import json as _json2
                             tbl_txt = "\n".join(
@@ -13322,7 +13438,7 @@ with tab_library:
             if st.button("🆚 Build comparison table", type="primary",
                          key="cmp_go", disabled=len(cmp_pick) < 2):
                 if not api_key.strip():
-                    st.error("Needs the API key / Max mode (sidebar).")
+                    st.error("Needs a signed-in model backend (sidebar).")
                 else:
                     fields = [f.strip() for f in cmp_fields.split(",")
                               if f.strip()][:10]
@@ -13453,7 +13569,7 @@ with tab_library:
         with col1:
             if st.button("📄 Summarise this paper", use_container_width=True):
                 if not api_key.strip():
-                    st.error("Needs the API key (sidebar).")
+                    st.error("Needs a signed-in model backend (sidebar).")
                 else:
                     col_obj = load_collection()
                     got = col_obj.get(where={"doc_sig": paper["sig"]},
